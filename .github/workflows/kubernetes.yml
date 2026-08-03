@@ -1,0 +1,98 @@
+name: Kubernetes static validation
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: kubernetes-static-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  HELM_VERSION: 4.2.0
+  KUBECONFORM_VERSION: 0.7.0
+  CHART: deploy/helm/ai-support-platform
+
+jobs:
+  validate:
+    name: Helm, schema, and policy validation
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Set up Python
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.14"
+          cache: pip
+          cache-dependency-path: requirements-dev.lock
+      - name: Install hash-locked validation dependencies
+        run: python -m pip install --require-hashes --requirement requirements-dev.lock
+      - name: Install checksum-verified Helm
+        shell: bash
+        run: |
+          archive="helm-v${HELM_VERSION}-linux-amd64.tar.gz"
+          curl --fail --silent --show-error --location "https://get.helm.sh/${archive}" --output "/tmp/${archive}"
+          curl --fail --silent --show-error --location "https://get.helm.sh/${archive}.sha256sum" --output "/tmp/${archive}.sha256sum"
+          (cd /tmp && sha256sum --check "${archive}.sha256sum")
+          tar --extract --gzip --file "/tmp/${archive}" --directory /tmp
+          install -m 0755 /tmp/linux-amd64/helm /usr/local/bin/helm
+          helm version --short
+      - name: Install checksum-verified kubeconform
+        shell: bash
+        run: |
+          archive="kubeconform-linux-amd64.tar.gz"
+          base="https://github.com/yannh/kubeconform/releases/download/v${KUBECONFORM_VERSION}"
+          curl --fail --silent --show-error --location "${base}/${archive}" --output "/tmp/${archive}"
+          curl --fail --silent --show-error --location "${base}/CHECKSUMS" --output /tmp/kubeconform-checksums
+          (cd /tmp && grep " ${archive}$" kubeconform-checksums | sha256sum --check -)
+          tar --extract --gzip --file "/tmp/${archive}" --directory /tmp kubeconform
+          install -m 0755 /tmp/kubeconform /usr/local/bin/kubeconform
+          kubeconform -v
+      - name: Validate chart metadata and safe defaults
+        run: python scripts/k8s/validate-chart.py
+      - name: Lint chart profiles
+        run: |
+          helm lint "$CHART"
+          helm lint "$CHART" --values "$CHART/values-dev.yaml"
+          helm lint "$CHART" --values "$CHART/values-ci.yaml"
+          helm lint "$CHART" --values "$CHART/values-external.yaml"
+          helm lint "$CHART" --set postgres.enabled=false --set networkPolicy.enabled=false
+          helm lint "$CHART" --set kafka.enabled=false --set-string kafka.externalBootstrapServers=kafka.example.internal:9092 --set networkPolicy.enabled=false
+      - name: Render supported topologies
+        run: |
+          mkdir -p ci-artifacts/kubernetes
+          helm template ai-support "$CHART" --set-string fullnameOverride=ai-support > ci-artifacts/kubernetes/default.yaml
+          helm template ai-support "$CHART" --values "$CHART/values-dev.yaml" --set-string fullnameOverride=ai-support > ci-artifacts/kubernetes/development.yaml
+          helm template ai-support "$CHART" --values "$CHART/values-ci.yaml" --set-string fullnameOverride=ai-support > ci-artifacts/kubernetes/hosted-ci.yaml
+          helm template ai-support "$CHART" --values "$CHART/values-external.yaml" --set-string fullnameOverride=ai-support > ci-artifacts/kubernetes/external-services.yaml
+          helm template ai-support "$CHART" --set-string fullnameOverride=ai-support --set postgres.enabled=false --set networkPolicy.enabled=false > ci-artifacts/kubernetes/external-postgres.yaml
+          helm template ai-support "$CHART" --set-string fullnameOverride=ai-support --set kafka.enabled=false --set-string kafka.externalBootstrapServers=kafka.example.internal:9092 --set networkPolicy.enabled=false > ci-artifacts/kubernetes/external-kafka.yaml
+      - name: Validate Kubernetes schemas
+        run: kubeconform -strict -summary -kubernetes-version 1.35.0 ci-artifacts/kubernetes/*.yaml
+      - name: Enforce rendered-manifest security policy
+        shell: bash
+        run: |
+          for manifest in ci-artifacts/kubernetes/*.yaml; do
+            python scripts/k8s/validate-rendered-manifests.py "$manifest"
+          done
+      - name: Scan Helm and rendered Kubernetes configuration
+        run: |
+          docker run --rm -v "$PWD:/src" aquasec/trivy@sha256:7cced7cae583819fc7806d4cbc0dbbc7cad18b99f7d3e235192e6da8c091045c config --exit-code 1 --severity HIGH,CRITICAL /src/deploy/helm
+          docker run --rm -v "$PWD:/src" aquasec/trivy@sha256:7cced7cae583819fc7806d4cbc0dbbc7cad18b99f7d3e235192e6da8c091045c config --exit-code 1 --severity HIGH,CRITICAL /src/ci-artifacts/kubernetes
+      - name: Upload rendered diagnostics on failure
+        if: failure()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: kubernetes-static-diagnostics-${{ github.sha }}
+          path: ci-artifacts/kubernetes/
+          if-no-files-found: warn
+          retention-days: 7
