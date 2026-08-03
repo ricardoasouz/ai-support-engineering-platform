@@ -86,7 +86,7 @@ jobs:
         run: |
           kubectl -n "$NAMESPACE" port-forward "service/${RELEASE_NAME}-api" 18080:8000 > /tmp/port-forward.log 2>&1 &
           echo $! > /tmp/port-forward.pid
-          for attempt in {1..30}; do curl -fsS http://127.0.0.1:18080/health && break; sleep 1; done
+          for _ in {1..30}; do curl -fsS http://127.0.0.1:18080/health && break; sleep 1; done
           RUN_INTEGRATION_TESTS=1 INTEGRATION_BASE_URL=http://127.0.0.1:18080 python -m pytest -m "integration and e2e" integration_tests -q
       - name: Validate API and worker pod recovery
         shell: bash

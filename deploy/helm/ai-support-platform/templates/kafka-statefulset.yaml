@@ -79,7 +79,7 @@ spec:
             {{- toYaml .Values.kafka.resources | nindent 12 }}
           securityContext:
             allowPrivilegeEscalation: false
-            readOnlyRootFilesystem: false
+            readOnlyRootFilesystem: true
             capabilities:
               drop: ["ALL"]
           volumeMounts:
@@ -87,10 +87,20 @@ spec:
               mountPath: /var/lib/kafka/data
             - name: tmp
               mountPath: /tmp
+            - name: kafka-config
+              mountPath: /opt/kafka/config
+            - name: kafka-logs
+              mountPath: /opt/kafka/logs
       volumes:
         - name: tmp
           emptyDir:
             sizeLimit: 128Mi
+        - name: kafka-config
+          emptyDir:
+            sizeLimit: 16Mi
+        - name: kafka-logs
+          emptyDir:
+            sizeLimit: 256Mi
         {{- if not .Values.kafka.persistence.enabled }}
         - name: data
           emptyDir: {}
