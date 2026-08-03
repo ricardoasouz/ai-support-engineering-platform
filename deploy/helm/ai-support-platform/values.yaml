@@ -1,0 +1,327 @@
+nameOverride: ""
+fullnameOverride: ""
+
+global:
+  appEnvironment: development
+  imagePullSecrets: []
+  podAnnotations: {}
+  podLabels: {}
+
+image:
+  tag: dev
+  pullPolicy: IfNotPresent
+
+api:
+  replicaCount: 1
+  image:
+    repository: ai-support-platform-api
+  workersPerPod: 1
+  service:
+    type: ClusterIP
+    port: 8000
+    nodePort: null
+  terminationGracePeriodSeconds: 30
+  startupProbe:
+    failureThreshold: 30
+    periodSeconds: 2
+  readinessProbe:
+    periodSeconds: 5
+    timeoutSeconds: 2
+  livenessProbe:
+    periodSeconds: 10
+    timeoutSeconds: 2
+  resources:
+    requests:
+      cpu: 100m
+      memory: 192Mi
+    limits:
+      cpu: 750m
+      memory: 512Mi
+  topologySpreadConstraints: []
+  affinity: {}
+  nodeSelector: {}
+  tolerations: []
+  pdb:
+    enabled: true
+    minAvailable: 1
+  autoscaling:
+    enabled: false
+    minReplicas: 2
+    maxReplicas: 6
+    targetCPUUtilizationPercentage: 70
+    targetMemoryUtilizationPercentage: null
+
+worker:
+  replicaCount: 1
+  image:
+    repository: ai-support-platform-worker
+  terminationGracePeriodSeconds: 60
+  resources:
+    requests:
+      cpu: 250m
+      memory: 384Mi
+    limits:
+      cpu: "1"
+      memory: 1Gi
+  topologySpreadConstraints: []
+  affinity: {}
+  nodeSelector: {}
+  tolerations: []
+  pdb:
+    enabled: true
+    minAvailable: 1
+
+serviceAccounts:
+  create: true
+  annotations: {}
+  apiName: ""
+  workerName: ""
+  jobsName: ""
+  platformName: ""
+
+secrets:
+  # Production-like installs should point at a separately managed Secret.
+  existingSecret: ai-support-platform-secrets
+  create: false
+  keys:
+    databaseUrl: database-url
+    postgresPassword: postgres-password
+    grafanaAdminPassword: grafana-admin-password
+  values:
+    databaseUrl: ""
+    postgresPassword: ""
+    grafanaAdminPassword: ""
+
+config:
+  logLevel: INFO
+  apiMaxRequestBodyBytes: 24576
+  databasePoolSize: 10
+  databaseMaxOverflow: 10
+  databasePoolTimeoutSeconds: 30
+  databasePoolRecycleSeconds: 1800
+  databaseConnectTimeoutSeconds: 10
+  kafka:
+    enabled: true
+    incidentCreatedTopic: incident.created
+    topicPartitions: 3
+    consumerGroup: incident-processing-v1
+    producerClientId: support-api
+    producerAcks: all
+    producerEnableIdempotence: true
+    producerDeliveryTimeoutMs: 5000
+    producerRetries: 5
+    producerRequestTimeoutMs: 3000
+    outboxPollIntervalSeconds: 5
+    outboxBatchSize: 20
+    workerClientId: incident-worker
+    workerPollTimeoutSeconds: 1
+    workerMaxPollIntervalMs: 900000
+    workerRetryBackoffSeconds: 2
+    consumerSessionTimeoutMs: 45000
+    consumerHeartbeatIntervalMs: 3000
+  providers:
+    allowFake: false
+    llm: ollama
+    embedding: ollama
+    embeddingDimensions: 768
+    ollamaRequestTimeoutSeconds: 180
+  knowledge:
+    basePath: /app/knowledge_base
+    chunkSize: 900
+    retrievalTopK: 4
+  ai:
+    maxAttempts: 5
+    processingStaleSeconds: 120
+  agent:
+    maxSteps: 8
+    maxToolCalls: 6
+    maxRepeatedToolCalls: 1
+    maxRetrievalChunks: 4
+    maxDurationSeconds: 600
+    toolTimeoutSeconds: 180
+    modelRetries: 3
+    repairAttempts: 2
+    plannerPromptVersion: v2
+    resolverPromptVersion: v1
+  telemetry:
+    tracesExporter: otlp
+    metricsExporter: otlp
+    externalOtlpEndpoint: ""
+    resourceAttributes: deployment.environment.name=kubernetes,service.namespace=ai-support-platform
+
+migration:
+  enabled: true
+  backoffLimit: 6
+  activeDeadlineSeconds: 300
+  resources:
+    requests:
+      cpu: 50m
+      memory: 128Mi
+    limits:
+      cpu: 500m
+      memory: 256Mi
+
+knowledgeIngestion:
+  enabled: true
+  backoffLimit: 3
+  activeDeadlineSeconds: 900
+  hookDeletePolicy: before-hook-creation,hook-succeeded
+  resources:
+    requests:
+      cpu: 100m
+      memory: 256Mi
+    limits:
+      cpu: "1"
+      memory: 768Mi
+
+postgres:
+  enabled: true
+  image:
+    repository: pgvector/pgvector
+    tag: 0.8.5-pg17-trixie
+    pullPolicy: IfNotPresent
+  username: support_user
+  database: support_platform
+  port: 5432
+  persistence:
+    enabled: true
+    size: 8Gi
+    storageClass: ""
+  resources:
+    requests:
+      cpu: 250m
+      memory: 512Mi
+    limits:
+      cpu: "1"
+      memory: 1Gi
+
+kafka:
+  enabled: true
+  image:
+    repository: apache/kafka
+    tag: 4.3.1
+    pullPolicy: IfNotPresent
+  port: 9092
+  controllerPort: 9093
+  clusterId: MkU3OEVBNTcwNTJENDM2Qk
+  externalBootstrapServers: ""
+  persistence:
+    enabled: true
+    size: 8Gi
+    storageClass: ""
+  resources:
+    requests:
+      cpu: 300m
+      memory: 768Mi
+    limits:
+      cpu: "1"
+      memory: 1536Mi
+
+ollama:
+  enabled: true
+  image:
+    repository: ollama/ollama
+    tag: 0.32.3
+    pullPolicy: IfNotPresent
+  port: 11434
+  externalBaseUrl: ""
+  models:
+    llm: qwen2.5:1.5b-instruct
+    embedding: nomic-embed-text:v1.5
+  keepAlive: 5m
+  persistence:
+    enabled: true
+    size: 12Gi
+    storageClass: ""
+  modelInit:
+    enabled: true
+    backoffLimit: 5
+    activeDeadlineSeconds: 3600
+  resources:
+    requests:
+      cpu: 500m
+      memory: 2Gi
+    limits:
+      cpu: "2"
+      memory: 4Gi
+  nodeSelector: {}
+  tolerations: []
+
+observability:
+  enabled: true
+  otelCollector:
+    image:
+      repository: otel/opentelemetry-collector-contrib
+      tag: 0.157.0
+    resources:
+      requests: {cpu: 100m, memory: 192Mi}
+      limits: {cpu: 500m, memory: 512Mi}
+  prometheus:
+    image:
+      repository: prom/prometheus
+      tag: v3.13.0
+    persistence:
+      enabled: true
+      size: 4Gi
+      storageClass: ""
+    resources:
+      requests: {cpu: 100m, memory: 256Mi}
+      limits: {cpu: 750m, memory: 768Mi}
+  tempo:
+    image:
+      repository: grafana/tempo
+      tag: 2.10.5
+    persistence:
+      enabled: true
+      size: 4Gi
+      storageClass: ""
+    resources:
+      requests: {cpu: 100m, memory: 256Mi}
+      limits: {cpu: 750m, memory: 768Mi}
+  grafana:
+    image:
+      repository: grafana/grafana
+      tag: 13.1.0
+    adminUser: admin
+    service:
+      type: ClusterIP
+      port: 3000
+      nodePort: null
+    persistence:
+      enabled: true
+      size: 2Gi
+      storageClass: ""
+    resources:
+      requests: {cpu: 100m, memory: 256Mi}
+      limits: {cpu: 500m, memory: 512Mi}
+
+networkPolicy:
+  enabled: true
+  allowOllamaModelDownloads: true
+  # Required when disabled in-cluster services are reached outside the cluster.
+  externalEgressCidrs: []
+
+ingress:
+  enabled: false
+  className: ""
+  annotations: {}
+  hosts:
+    - host: ai-support.local
+      paths:
+        - path: /
+          pathType: Prefix
+  tls: []
+  grafana:
+    enabled: false
+    className: ""
+    annotations: {}
+    host: grafana.ai-support.local
+    path: /
+    pathType: Prefix
+    tls: []
+
+podSecurity:
+  runAsUser: 10001
+  runAsGroup: 10001
+  fsGroup: 10001
+  seccompProfile: RuntimeDefault

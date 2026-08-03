@@ -1,0 +1,282 @@
+{{- if .Values.networkPolicy.enabled }}
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "ai-support-platform.fullname" . }}-default-deny
+  labels:
+    {{- include "ai-support-platform.labels" . | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      {{- include "ai-support-platform.selectorLabels" . | nindent 6 }}
+  policyTypes: [Ingress, Egress]
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "ai-support-platform.fullname" . }}-dns
+  labels:
+    {{- include "ai-support-platform.labels" . | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      {{- include "ai-support-platform.selectorLabels" . | nindent 6 }}
+  policyTypes: [Egress]
+  egress:
+    - to:
+        - namespaceSelector: {}
+      ports:
+        - {protocol: UDP, port: 53}
+        - {protocol: TCP, port: 53}
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "ai-support-platform.fullname" . }}-api
+  labels:
+    {{- include "ai-support-platform.labels" . | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      {{- include "ai-support-platform.componentLabels" (dict "root" . "component" "api") | nindent 6 }}
+  policyTypes: [Ingress, Egress]
+  ingress:
+    - ports:
+        - {protocol: TCP, port: 8000}
+  egress:
+    {{- if .Values.postgres.enabled }}
+    - to:
+        - podSelector:
+            matchLabels:
+              {{- include "ai-support-platform.componentLabels" (dict "root" . "component" "postgres") | nindent 14 }}
+      ports: [{protocol: TCP, port: {{ .Values.postgres.port }}}]
+    {{- end }}
+    {{- if .Values.kafka.enabled }}
+    - to:
+        - podSelector:
+            matchLabels:
+              {{- include "ai-support-platform.componentLabels" (dict "root" . "component" "kafka") | nindent 14 }}
+      ports: [{protocol: TCP, port: {{ .Values.kafka.port }}}]
+    {{- end }}
+    {{- if .Values.ollama.enabled }}
+    - to:
+        - podSelector:
+            matchLabels:
+              {{- include "ai-support-platform.componentLabels" (dict "root" . "component" "ollama") | nindent 14 }}
+      ports: [{protocol: TCP, port: {{ .Values.ollama.port }}}]
+    {{- end }}
+    {{- if .Values.observability.enabled }}
+    - to:
+        - podSelector:
+            matchLabels:
+              {{- include "ai-support-platform.componentLabels" (dict "root" . "component" "otel-collector") | nindent 14 }}
+      ports: [{protocol: TCP, port: 4317}]
+    {{- end }}
+    {{- range .Values.networkPolicy.externalEgressCidrs }}
+    - to:
+        - ipBlock: {cidr: {{ . | quote }}}
+    {{- end }}
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "ai-support-platform.fullname" . }}-worker
+  labels:
+    {{- include "ai-support-platform.labels" . | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      {{- include "ai-support-platform.componentLabels" (dict "root" . "component" "worker") | nindent 6 }}
+  policyTypes: [Egress]
+  egress:
+    {{- if .Values.postgres.enabled }}
+    - to:
+        - podSelector:
+            matchLabels:
+              {{- include "ai-support-platform.componentLabels" (dict "root" . "component" "postgres") | nindent 14 }}
+      ports: [{protocol: TCP, port: {{ .Values.postgres.port }}}]
+    {{- end }}
+    {{- if .Values.kafka.enabled }}
+    - to:
+        - podSelector:
+            matchLabels:
+              {{- include "ai-support-platform.componentLabels" (dict "root" . "component" "kafka") | nindent 14 }}
+      ports: [{protocol: TCP, port: {{ .Values.kafka.port }}}]
+    {{- end }}
+    {{- if .Values.ollama.enabled }}
+    - to:
+        - podSelector:
+            matchLabels:
+              {{- include "ai-support-platform.componentLabels" (dict "root" . "component" "ollama") | nindent 14 }}
+      ports: [{protocol: TCP, port: {{ .Values.ollama.port }}}]
+    {{- end }}
+    {{- if .Values.observability.enabled }}
+    - to:
+        - podSelector:
+            matchLabels:
+              {{- include "ai-support-platform.componentLabels" (dict "root" . "component" "otel-collector") | nindent 14 }}
+      ports: [{protocol: TCP, port: 4317}]
+    {{- end }}
+    {{- range .Values.networkPolicy.externalEgressCidrs }}
+    - to:
+        - ipBlock: {cidr: {{ . | quote }}}
+    {{- end }}
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "ai-support-platform.fullname" . }}-jobs
+  labels:
+    {{- include "ai-support-platform.labels" . | nindent 4 }}
+spec:
+  podSelector:
+    matchExpressions:
+      - key: app.kubernetes.io/name
+        operator: In
+        values: [{{ include "ai-support-platform.name" . }}]
+      - key: app.kubernetes.io/instance
+        operator: In
+        values: [{{ .Release.Name }}]
+      - key: app.kubernetes.io/component
+        operator: In
+        values: [migration, knowledge-ingestion, ollama-model-init]
+  policyTypes: [Egress]
+  egress:
+    {{- if .Values.postgres.enabled }}
+    - to:
+        - podSelector:
+            matchLabels:
+              {{- include "ai-support-platform.componentLabels" (dict "root" . "component" "postgres") | nindent 14 }}
+      ports: [{protocol: TCP, port: {{ .Values.postgres.port }}}]
+    {{- end }}
+    {{- if .Values.ollama.enabled }}
+    - to:
+        - podSelector:
+            matchLabels:
+              {{- include "ai-support-platform.componentLabels" (dict "root" . "component" "ollama") | nindent 14 }}
+      ports: [{protocol: TCP, port: {{ .Values.ollama.port }}}]
+    {{- end }}
+    {{- range .Values.networkPolicy.externalEgressCidrs }}
+    - to:
+        - ipBlock: {cidr: {{ . | quote }}}
+    {{- end }}
+{{- if .Values.postgres.enabled }}
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "ai-support-platform.fullname" . }}-postgres
+spec:
+  podSelector:
+    matchLabels:
+      {{- include "ai-support-platform.componentLabels" (dict "root" . "component" "postgres") | nindent 6 }}
+  policyTypes: [Ingress]
+  ingress:
+    - from:
+        - podSelector:
+            matchExpressions:
+              - key: app.kubernetes.io/component
+                operator: In
+                values: [api, worker, migration, knowledge-ingestion]
+      ports: [{protocol: TCP, port: {{ .Values.postgres.port }}}]
+{{- end }}
+{{- if .Values.kafka.enabled }}
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "ai-support-platform.fullname" . }}-kafka
+spec:
+  podSelector:
+    matchLabels:
+      {{- include "ai-support-platform.componentLabels" (dict "root" . "component" "kafka") | nindent 6 }}
+  policyTypes: [Ingress, Egress]
+  ingress:
+    - from:
+        - podSelector:
+            matchExpressions:
+              - key: app.kubernetes.io/component
+                operator: In
+                values: [api, worker, kafka]
+      ports:
+        - {protocol: TCP, port: {{ .Values.kafka.port }}}
+        - {protocol: TCP, port: {{ .Values.kafka.controllerPort }}}
+  egress:
+    - to:
+        - podSelector:
+            matchLabels:
+              {{- include "ai-support-platform.componentLabels" (dict "root" . "component" "kafka") | nindent 14 }}
+      ports:
+        - {protocol: TCP, port: {{ .Values.kafka.port }}}
+        - {protocol: TCP, port: {{ .Values.kafka.controllerPort }}}
+{{- end }}
+{{- if .Values.ollama.enabled }}
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "ai-support-platform.fullname" . }}-ollama
+spec:
+  podSelector:
+    matchLabels:
+      {{- include "ai-support-platform.componentLabels" (dict "root" . "component" "ollama") | nindent 6 }}
+  policyTypes: [Ingress, Egress]
+  ingress:
+    - from:
+        - podSelector:
+            matchExpressions:
+              - key: app.kubernetes.io/component
+                operator: In
+                values: [api, worker, knowledge-ingestion, ollama-model-init]
+      ports: [{protocol: TCP, port: {{ .Values.ollama.port }}}]
+  egress:
+    {{- if .Values.networkPolicy.allowOllamaModelDownloads }}
+    - to:
+        - ipBlock: {cidr: 0.0.0.0/0}
+      ports:
+        - {protocol: TCP, port: 80}
+        - {protocol: TCP, port: 443}
+    {{- else }}
+    []
+    {{- end }}
+{{- end }}
+{{- if .Values.observability.enabled }}
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "ai-support-platform.fullname" . }}-observability
+spec:
+  podSelector:
+    matchExpressions:
+      - key: app.kubernetes.io/name
+        operator: In
+        values: [{{ include "ai-support-platform.name" . }}]
+      - key: app.kubernetes.io/instance
+        operator: In
+        values: [{{ .Release.Name }}]
+      - key: app.kubernetes.io/component
+        operator: In
+        values: [otel-collector, prometheus, tempo, grafana]
+  policyTypes: [Ingress, Egress]
+  ingress:
+    - from:
+        - podSelector: {}
+      ports:
+        - {protocol: TCP, port: 3000}
+        - {protocol: TCP, port: 3200}
+        - {protocol: TCP, port: 4317}
+        - {protocol: TCP, port: 4318}
+        - {protocol: TCP, port: 8889}
+        - {protocol: TCP, port: 9090}
+        - {protocol: TCP, port: 13133}
+  egress:
+    - to:
+        - podSelector: {}
+      ports:
+        - {protocol: TCP, port: 3200}
+        - {protocol: TCP, port: 4317}
+        - {protocol: TCP, port: 8889}
+        - {protocol: TCP, port: 9090}
+{{- end }}
+{{- end }}

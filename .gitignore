@@ -17,6 +17,7 @@ env/
 .python/
 .uv-cache/
 .uv-tools/
+.tools/
 
 # Environment and secrets
 .env

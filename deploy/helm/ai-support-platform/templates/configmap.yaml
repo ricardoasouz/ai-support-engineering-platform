@@ -1,0 +1,65 @@
+{{- include "ai-support-platform.validateValues" . }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "ai-support-platform.fullname" . }}-app
+  labels:
+    {{- include "ai-support-platform.labels" . | nindent 4 }}
+data:
+  APP_ENVIRONMENT: {{ .Values.global.appEnvironment | quote }}
+  LOG_LEVEL: {{ .Values.config.logLevel | quote }}
+  API_MAX_REQUEST_BODY_BYTES: {{ .Values.config.apiMaxRequestBodyBytes | quote }}
+  API_WORKERS: {{ .Values.api.workersPerPod | quote }}
+  RUN_DATABASE_MIGRATIONS_ON_STARTUP: "false"
+  RUN_KNOWLEDGE_INGESTION_ON_STARTUP: "false"
+  DATABASE_POOL_SIZE: {{ .Values.config.databasePoolSize | quote }}
+  DATABASE_MAX_OVERFLOW: {{ .Values.config.databaseMaxOverflow | quote }}
+  DATABASE_POOL_TIMEOUT_SECONDS: {{ .Values.config.databasePoolTimeoutSeconds | quote }}
+  DATABASE_POOL_RECYCLE_SECONDS: {{ .Values.config.databasePoolRecycleSeconds | quote }}
+  DATABASE_CONNECT_TIMEOUT_SECONDS: {{ .Values.config.databaseConnectTimeoutSeconds | quote }}
+  KAFKA_ENABLED: {{ .Values.config.kafka.enabled | quote }}
+  KAFKA_BOOTSTRAP_SERVERS: {{ ternary (printf "%s-kafka:%v" (include "ai-support-platform.fullname" .) .Values.kafka.port) .Values.kafka.externalBootstrapServers .Values.kafka.enabled | quote }}
+  KAFKA_INCIDENT_CREATED_TOPIC: {{ .Values.config.kafka.incidentCreatedTopic | quote }}
+  KAFKA_TOPIC_PARTITIONS: {{ .Values.config.kafka.topicPartitions | quote }}
+  KAFKA_CONSUMER_GROUP: {{ .Values.config.kafka.consumerGroup | quote }}
+  KAFKA_PRODUCER_CLIENT_ID: {{ .Values.config.kafka.producerClientId | quote }}
+  KAFKA_PRODUCER_ACKS: {{ .Values.config.kafka.producerAcks | quote }}
+  KAFKA_PRODUCER_ENABLE_IDEMPOTENCE: {{ .Values.config.kafka.producerEnableIdempotence | quote }}
+  KAFKA_PRODUCER_DELIVERY_TIMEOUT_MS: {{ .Values.config.kafka.producerDeliveryTimeoutMs | quote }}
+  KAFKA_PRODUCER_RETRIES: {{ .Values.config.kafka.producerRetries | quote }}
+  KAFKA_PRODUCER_REQUEST_TIMEOUT_MS: {{ .Values.config.kafka.producerRequestTimeoutMs | quote }}
+  KAFKA_OUTBOX_POLL_INTERVAL_SECONDS: {{ .Values.config.kafka.outboxPollIntervalSeconds | quote }}
+  KAFKA_OUTBOX_BATCH_SIZE: {{ .Values.config.kafka.outboxBatchSize | quote }}
+  KAFKA_WORKER_CLIENT_ID: {{ .Values.config.kafka.workerClientId | quote }}
+  KAFKA_WORKER_POLL_TIMEOUT_SECONDS: {{ .Values.config.kafka.workerPollTimeoutSeconds | quote }}
+  KAFKA_WORKER_MAX_POLL_INTERVAL_MS: {{ .Values.config.kafka.workerMaxPollIntervalMs | quote }}
+  KAFKA_WORKER_RETRY_BACKOFF_SECONDS: {{ .Values.config.kafka.workerRetryBackoffSeconds | quote }}
+  KAFKA_CONSUMER_SESSION_TIMEOUT_MS: {{ .Values.config.kafka.consumerSessionTimeoutMs | quote }}
+  KAFKA_CONSUMER_HEARTBEAT_INTERVAL_MS: {{ .Values.config.kafka.consumerHeartbeatIntervalMs | quote }}
+  ALLOW_FAKE_PROVIDERS: {{ .Values.config.providers.allowFake | quote }}
+  LLM_PROVIDER: {{ .Values.config.providers.llm | quote }}
+  EMBEDDING_PROVIDER: {{ .Values.config.providers.embedding | quote }}
+  EMBEDDING_DIMENSIONS: {{ .Values.config.providers.embeddingDimensions | quote }}
+  OLLAMA_BASE_URL: {{ ternary (printf "http://%s-ollama:%v" (include "ai-support-platform.fullname" .) .Values.ollama.port) (default "http://127.0.0.1:11434" .Values.ollama.externalBaseUrl) .Values.ollama.enabled | quote }}
+  OLLAMA_LLM_MODEL: {{ .Values.ollama.models.llm | quote }}
+  OLLAMA_EMBEDDING_MODEL: {{ .Values.ollama.models.embedding | quote }}
+  OLLAMA_REQUEST_TIMEOUT_SECONDS: {{ .Values.config.providers.ollamaRequestTimeoutSeconds | quote }}
+  KNOWLEDGE_BASE_PATH: {{ .Values.config.knowledge.basePath | quote }}
+  KNOWLEDGE_CHUNK_SIZE: {{ .Values.config.knowledge.chunkSize | quote }}
+  KNOWLEDGE_RETRIEVAL_TOP_K: {{ .Values.config.knowledge.retrievalTopK | quote }}
+  AI_MAX_ATTEMPTS: {{ .Values.config.ai.maxAttempts | quote }}
+  AI_PROCESSING_STALE_SECONDS: {{ .Values.config.ai.processingStaleSeconds | quote }}
+  AGENT_MAX_STEPS: {{ .Values.config.agent.maxSteps | quote }}
+  AGENT_MAX_TOOL_CALLS: {{ .Values.config.agent.maxToolCalls | quote }}
+  AGENT_MAX_REPEATED_TOOL_CALLS: {{ .Values.config.agent.maxRepeatedToolCalls | quote }}
+  AGENT_MAX_RETRIEVAL_CHUNKS: {{ .Values.config.agent.maxRetrievalChunks | quote }}
+  AGENT_MAX_DURATION_SECONDS: {{ .Values.config.agent.maxDurationSeconds | quote }}
+  AGENT_TOOL_TIMEOUT_SECONDS: {{ .Values.config.agent.toolTimeoutSeconds | quote }}
+  AGENT_MODEL_RETRIES: {{ .Values.config.agent.modelRetries | quote }}
+  AGENT_REPAIR_ATTEMPTS: {{ .Values.config.agent.repairAttempts | quote }}
+  AGENT_PLANNER_PROMPT_VERSION: {{ .Values.config.agent.plannerPromptVersion | quote }}
+  AGENT_RESOLVER_PROMPT_VERSION: {{ .Values.config.agent.resolverPromptVersion | quote }}
+  OTEL_EXPORTER_OTLP_ENDPOINT: {{ ternary (printf "http://%s-otel-collector:4317" (include "ai-support-platform.fullname" .)) (default "http://127.0.0.1:4317" .Values.config.telemetry.externalOtlpEndpoint) .Values.observability.enabled | quote }}
+  OTEL_TRACES_EXPORTER: {{ .Values.config.telemetry.tracesExporter | quote }}
+  OTEL_METRICS_EXPORTER: {{ .Values.config.telemetry.metricsExporter | quote }}
+  OTEL_RESOURCE_ATTRIBUTES: {{ .Values.config.telemetry.resourceAttributes | quote }}

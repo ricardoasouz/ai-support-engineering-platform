@@ -1,0 +1,74 @@
+{{- if .Values.observability.enabled }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "ai-support-platform.fullname" . }}-otel-collector
+  labels:
+    {{- include "ai-support-platform.labels" . | nindent 4 }}
+    app.kubernetes.io/component: otel-collector
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      {{- include "ai-support-platform.componentLabels" (dict "root" . "component" "otel-collector") | nindent 6 }}
+  template:
+    metadata:
+      annotations:
+        checksum/observability-config: {{ include (print $.Template.BasePath "/observability-configmaps.yaml") . | sha256sum }}
+      labels:
+        {{- include "ai-support-platform.componentLabels" (dict "root" . "component" "otel-collector") | nindent 8 }}
+    spec:
+      serviceAccountName: {{ include "ai-support-platform.platformServiceAccountName" . }}
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        runAsGroup: 10001
+        seccompProfile: {type: {{ .Values.podSecurity.seccompProfile }}}
+      containers:
+        - name: otel-collector
+          image: "{{ .Values.observability.otelCollector.image.repository }}:{{ .Values.observability.otelCollector.image.tag }}"
+          args: ["--config=/etc/otelcol-contrib/config.yaml"]
+          ports:
+            - {name: otlp-grpc, containerPort: 4317}
+            - {name: otlp-http, containerPort: 4318}
+            - {name: metrics, containerPort: 8889}
+            - {name: health, containerPort: 13133}
+          readinessProbe:
+            httpGet: {path: /, port: health}
+            periodSeconds: 5
+          livenessProbe:
+            httpGet: {path: /, port: health}
+            periodSeconds: 10
+          resources:
+            {{- toYaml .Values.observability.otelCollector.resources | nindent 12 }}
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: {drop: ["ALL"]}
+          volumeMounts:
+            - {name: config, mountPath: /etc/otelcol-contrib/config.yaml, subPath: config.yaml, readOnly: true}
+            - {name: tmp, mountPath: /tmp}
+      volumes:
+        - name: config
+          configMap: {name: {{ include "ai-support-platform.fullname" . }}-otel-collector}
+        - name: tmp
+          emptyDir: {sizeLimit: 64Mi}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "ai-support-platform.fullname" . }}-otel-collector
+  labels:
+    {{- include "ai-support-platform.labels" . | nindent 4 }}
+    app.kubernetes.io/component: otel-collector
+spec:
+  type: ClusterIP
+  selector:
+    {{- include "ai-support-platform.componentLabels" (dict "root" . "component" "otel-collector") | nindent 4 }}
+  ports:
+    - {name: otlp-grpc, port: 4317, targetPort: otlp-grpc}
+    - {name: otlp-http, port: 4318, targetPort: otlp-http}
+    - {name: metrics, port: 8889, targetPort: metrics}
+    - {name: health, port: 13133, targetPort: health}
+{{- end }}

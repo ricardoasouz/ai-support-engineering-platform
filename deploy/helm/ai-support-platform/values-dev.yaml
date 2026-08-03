@@ -1,0 +1,28 @@
+# Local Kind/Docker Desktop values. Create the referenced Secret out-of-band.
+global:
+  appEnvironment: development
+
+image:
+  tag: dev
+  pullPolicy: Never
+
+secrets:
+  existingSecret: ai-support-platform-secrets
+
+api:
+  replicaCount: 1
+
+worker:
+  replicaCount: 1
+
+postgres:
+  enabled: true
+
+kafka:
+  enabled: true
+
+ollama:
+  enabled: true
+
+observability:
+  enabled: true

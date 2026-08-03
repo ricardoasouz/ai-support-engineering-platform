@@ -1,0 +1,12 @@
+apiVersion: v2
+name: ai-support-platform
+description: Portable Kubernetes packaging for the AI Support Engineering Platform
+type: application
+version: 0.1.0
+appVersion: "0.7.0"
+kubeVersion: ">=1.30.0-0"
+home: https://github.com/ricardoasouz/ai-support-engineering-platform
+sources:
+  - https://github.com/ricardoasouz/ai-support-engineering-platform
+maintainers:
+  - name: ricardoasouz

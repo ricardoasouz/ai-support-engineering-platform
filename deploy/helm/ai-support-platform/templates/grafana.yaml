@@ -1,0 +1,122 @@
+{{- if .Values.observability.enabled }}
+{{- if .Values.observability.grafana.persistence.enabled }}
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: {{ include "ai-support-platform.fullname" . }}-grafana
+  labels:
+    {{- include "ai-support-platform.labels" . | nindent 4 }}
+    app.kubernetes.io/component: grafana
+spec:
+  accessModes: ["ReadWriteOnce"]
+  {{- with .Values.observability.grafana.persistence.storageClass }}
+  storageClassName: {{ . | quote }}
+  {{- end }}
+  resources:
+    requests: {storage: {{ .Values.observability.grafana.persistence.size }}}
+---
+{{- end }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "ai-support-platform.fullname" . }}-grafana
+  labels:
+    {{- include "ai-support-platform.labels" . | nindent 4 }}
+    app.kubernetes.io/component: grafana
+spec:
+  replicas: 1
+  strategy: {type: Recreate}
+  selector:
+    matchLabels:
+      {{- include "ai-support-platform.componentLabels" (dict "root" . "component" "grafana") | nindent 6 }}
+  template:
+    metadata:
+      annotations:
+        checksum/observability-config: {{ include (print $.Template.BasePath "/observability-configmaps.yaml") . | sha256sum }}
+      labels:
+        {{- include "ai-support-platform.componentLabels" (dict "root" . "component" "grafana") | nindent 8 }}
+    spec:
+      serviceAccountName: {{ include "ai-support-platform.platformServiceAccountName" . }}
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 472
+        runAsGroup: 472
+        fsGroup: 472
+        seccompProfile: {type: {{ .Values.podSecurity.seccompProfile }}}
+      containers:
+        - name: grafana
+          image: "{{ .Values.observability.grafana.image.repository }}:{{ .Values.observability.grafana.image.tag }}"
+          ports:
+            - {name: http, containerPort: 3000}
+          env:
+            - {name: GF_SECURITY_ADMIN_USER, value: {{ .Values.observability.grafana.adminUser | quote }}}
+            - name: GF_SECURITY_ADMIN_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "ai-support-platform.secretName" . }}
+                  key: {{ .Values.secrets.keys.grafanaAdminPassword }}
+            - {name: GF_USERS_ALLOW_SIGN_UP, value: "false"}
+            - {name: GF_ANALYTICS_REPORTING_ENABLED, value: "false"}
+            - {name: GF_ANALYTICS_CHECK_FOR_UPDATES, value: "false"}
+            - {name: GF_PATHS_DATA, value: /var/lib/grafana}
+            - {name: GF_PATHS_LOGS, value: /var/log/grafana}
+            - {name: GF_PATHS_PLUGINS, value: /var/lib/grafana/plugins}
+            - {name: GF_PATHS_PROVISIONING, value: /etc/grafana/provisioning}
+          startupProbe:
+            httpGet: {path: /api/health, port: http}
+            failureThreshold: 30
+            periodSeconds: 3
+          readinessProbe:
+            httpGet: {path: /api/health, port: http}
+            periodSeconds: 5
+          livenessProbe:
+            httpGet: {path: /api/health, port: http}
+            periodSeconds: 10
+          resources:
+            {{- toYaml .Values.observability.grafana.resources | nindent 12 }}
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: {drop: ["ALL"]}
+          volumeMounts:
+            - {name: datasources, mountPath: /etc/grafana/provisioning/datasources/datasources.yaml, subPath: datasources.yaml, readOnly: true}
+            - {name: data, mountPath: /var/lib/grafana}
+            - {name: logs, mountPath: /var/log/grafana}
+            - {name: run, mountPath: /var/run}
+            - {name: tmp, mountPath: /tmp}
+      volumes:
+        - name: datasources
+          configMap: {name: {{ include "ai-support-platform.fullname" . }}-grafana-datasources}
+        - name: data
+          {{- if .Values.observability.grafana.persistence.enabled }}
+          persistentVolumeClaim: {claimName: {{ include "ai-support-platform.fullname" . }}-grafana}
+          {{- else }}
+          emptyDir: {}
+          {{- end }}
+        - name: logs
+          emptyDir: {sizeLimit: 128Mi}
+        - name: run
+          emptyDir: {sizeLimit: 32Mi}
+        - name: tmp
+          emptyDir: {sizeLimit: 64Mi}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "ai-support-platform.fullname" . }}-grafana
+  labels:
+    {{- include "ai-support-platform.labels" . | nindent 4 }}
+    app.kubernetes.io/component: grafana
+spec:
+  type: {{ .Values.observability.grafana.service.type }}
+  selector:
+    {{- include "ai-support-platform.componentLabels" (dict "root" . "component" "grafana") | nindent 4 }}
+  ports:
+    - name: http
+      port: {{ .Values.observability.grafana.service.port }}
+      targetPort: http
+      {{- if and (eq .Values.observability.grafana.service.type "NodePort") .Values.observability.grafana.service.nodePort }}
+      nodePort: {{ .Values.observability.grafana.service.nodePort }}
+      {{- end }}
+{{- end }}
