@@ -1,5 +1,6 @@
 """Incident API request and response models."""
 
+from datetime import datetime
 from enum import Enum
 
 from pydantic import BaseModel, ConfigDict, Field
@@ -73,3 +74,20 @@ class IncidentAnalysisResponse(BaseModel):
     severity: Severity
     probable_cause: str
     recommended_actions: list[str] = Field(min_length=1)
+
+
+class IncidentResponse(BaseModel):
+    """Persisted incident and its deterministic analysis."""
+
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    service: str
+    error: str
+    log: str
+    requested_severity: Severity | None
+    resolved_severity: Severity
+    classification: IncidentClassification
+    probable_cause: str
+    recommended_actions: list[str] = Field(min_length=1)
+    created_at: datetime

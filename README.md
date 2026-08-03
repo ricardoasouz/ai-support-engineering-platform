@@ -1,88 +1,99 @@
 # AI Support Engineering Platform
 
 AI Support Engineering Platform is an incrementally developed portfolio project
-for analyzing technical support incidents. Phase 1 provides the API foundation
-for the planned cloud-native platform: a validated FastAPI service that
-categorizes common failure signals and returns practical troubleshooting
-guidance.
+for analyzing technical support incidents. Phase 2 provides a persistent FastAPI
+service: deterministic incident analysis is stored in PostgreSQL and can be
+retrieved through a versioned API. Docker Compose supplies a reproducible API and
+database stack.
 
-The analyzer is deliberately rule-based in this phase. It does not use an LLM,
-persist data, or include deployment infrastructure yet.
+The analyzer remains deliberately rule-based. Kafka, LLMs, RAG, vector databases,
+Kubernetes, cloud deployment, CI/CD, and observability backends are not part of
+Phase 2.
 
-## Current architecture
+## Phase 2 architecture
 
 ```text
 Client
   |
   v
-FastAPI routes (app/api)
+FastAPI routes + Pydantic validation (app/api, app/models)
   |
-  +--> Pydantic validation (app/models)
-  |
-  +--> Deterministic analyzer (app/services)
+  v
+Incident workflow (app/services/incidents.py)
+  |                         |
+  v                         v
+Deterministic analyzer      Repository (app/repositories)
+                            |
+                            v
+                  SQLAlchemy 2.x session + ORM (app/db)
+                            |
+                            v
+                       PostgreSQL 17
+
+Alembic migrations (migrations/) ---> PostgreSQL schema
+Environment settings (app/core/) ---> API and database configuration
+Structured JSON logging ------------> standard output
 ```
+
+The boundaries keep HTTP handling, deterministic analysis, application workflow,
+and persistence separate. A POST is analyzed first and then its input and output
+are written in one database transaction. Retrieval queries go through the
+repository rather than embedding SQLAlchemy operations in the routes.
+
+Important files:
 
 ```text
 app/
-  main.py                 # FastAPI application
-  api/
-    router.py             # Route composition
-    routes/
-      health.py           # Health endpoint
-      incidents.py        # Incident analysis endpoint
-  models/
-    health.py             # Health response schema
-    incident.py           # Incident request/response schemas
-  services/
-    analyzer.py           # Ordered classification rules
-tests/
-  conftest.py             # Shared API test client
-  test_api.py             # HTTP contract and validation tests
-  test_analyzer.py        # Analyzer unit and precedence tests
-requirements.txt          # Runtime dependencies
-requirements-dev.txt      # Runtime plus test dependencies
+  main.py                    # FastAPI lifecycle and request logging
+  api/routes/incidents.py    # Analyze, list, and retrieve endpoints
+  core/config.py             # Environment settings
+  core/logging.py            # JSON log formatter/configuration
+  db/base.py                 # Declarative base and naming convention
+  db/models.py               # Incident ORM mapping
+  db/session.py              # Engine/session lifecycle
+  models/incident.py         # Request and response schemas
+  repositories/incidents.py  # Incident reads and writes
+  services/analyzer.py       # Ordered deterministic rules
+  services/incidents.py      # Analyze-and-persist transaction
+migrations/                  # Alembic environment and revisions
+tests/                       # Analyzer, API, and persistence tests
+Dockerfile                   # Non-root production-style API image
+docker-compose.yml           # API + PostgreSQL 17 local stack
 ```
 
-## Current functionality
+## Persistence and database schema
 
-- Health reporting through `GET /health`
-- Incident analysis through `POST /api/v1/incidents`
-- Pydantic validation for all request and response payloads
-- Deterministic recognition of:
-  - authentication and JWT errors
-  - database connection errors
-  - timeout errors
-  - unknown errors
-- Default severity assignment with optional caller-provided severity override
-- Probable cause and recommended troubleshooting actions
-- Interactive OpenAPI documentation at `/docs`
+SQLAlchemy 2.x maps the `incidents` table. Alembic owns schema changes; the API
+does not call `create_all` at runtime.
 
-Rules are evaluated in a fixed order: authentication, database connection, then
-timeout. This makes results reproducible when an incident contains overlapping
-signals. Unknown incidents and timeout incidents default to `medium`,
-authentication incidents to `high`, and database connection incidents to
-`critical`. Accepted severity values are `low`, `medium`, `high`, and `critical`.
+| Column | Type | Notes |
+| --- | --- | --- |
+| `id` | integer | Primary key |
+| `service` | varchar(100) | Indexed, exact-match filter |
+| `error` | varchar(1000) | Submitted error summary |
+| `log` | text | Submitted log excerpt |
+| `requested_severity` | varchar(8), nullable | Optional caller override |
+| `resolved_severity` | varchar(8) | Analyzer result after override, indexed |
+| `classification` | varchar(50) | Deterministic classification, indexed |
+| `probable_cause` | text | Generated explanation |
+| `recommended_actions` | JSON | Ordered string list |
+| `created_at` | timestamp with time zone | Database-generated creation time |
 
-The incident endpoint returns `200 OK` because Phase 1 computes and returns an
-analysis without creating or persisting a resource. Invalid request bodies use
-FastAPI's standard `422 Unprocessable Content` validation response.
+Check constraints protect the supported severity and classification values. The
+JSON column keeps recommendations as a structured ordered list without coupling
+the schema to a fixed number of actions.
 
-## API examples
+## API
 
-Check service health:
+Interactive OpenAPI documentation is available at `http://127.0.0.1:8000/docs`.
+
+### Health
 
 ```bash
 curl http://127.0.0.1:8000/health
 ```
 
-```json
-{
-  "status": "healthy",
-  "service": "ai-support-engineering-platform"
-}
-```
-
-Analyze an incident:
+### Analyze and persist an incident
 
 ```bash
 curl -X POST http://127.0.0.1:8000/api/v1/incidents \
@@ -95,7 +106,7 @@ curl -X POST http://127.0.0.1:8000/api/v1/incidents \
   }'
 ```
 
-Example response:
+The Phase 1 response contract is preserved:
 
 ```json
 {
@@ -111,50 +122,126 @@ Example response:
 ```
 
 `severity` is optional. `service`, `error`, and `log` are required non-empty
-strings. The maximum accepted lengths are 100 characters for `service`, 1,000
-for `error`, and 20,000 for `log`. Undeclared request fields are rejected.
+strings. Maximum lengths are 100, 1,000, and 20,000 characters respectively.
+Unknown request fields are rejected.
 
-## Run locally
-
-Prerequisites: Python 3.11 or newer.
-
-Create and activate a virtual environment on macOS or Linux:
+### List incidents
 
 ```bash
-python -m venv .venv
-source .venv/bin/activate
+curl "http://127.0.0.1:8000/api/v1/incidents?service=identity-api&severity=high&classification=authentication_error&limit=50&offset=0"
 ```
 
-On Windows PowerShell:
+All filters are optional. `severity` filters the resolved severity. Results are
+ordered newest first; `limit` is between 1 and 100 and defaults to 50. The
+response contains the stored input, requested and resolved severity, full
+analysis, ID, and creation timestamp.
+
+### Retrieve one incident
+
+```bash
+curl http://127.0.0.1:8000/api/v1/incidents/1
+```
+
+An unknown ID returns `404 Not Found` with `{"detail":"Incident not found"}`.
+
+## Docker Compose setup
+
+Prerequisites: Docker Desktop or Docker Engine with Compose, plus the ability to
+run the `postgres:17` image.
+
+Create local settings from the example and replace `change-me` with a private
+password:
+
+```powershell
+Copy-Item .env.example .env
+```
+
+On macOS or Linux:
+
+```bash
+cp .env.example .env
+```
+
+Start the stack and build the API image:
+
+```bash
+docker compose up --build -d
+docker compose ps
+docker compose logs -f api
+```
+
+The stack contains:
+
+- `db`: PostgreSQL 17, `pg_isready` health check, and the named
+  `postgres_data` volume.
+- `api`: non-root FastAPI container, HTTP health check, structured JSON logs,
+  and health-aware dependency on `db`. It runs `alembic upgrade head` before
+  starting Uvicorn.
+
+Stop containers without deleting stored incidents:
+
+```bash
+docker compose down
+```
+
+Deleting the named volume also deletes the PostgreSQL data and is intentionally
+not part of the normal shutdown command.
+
+## Run locally with Python
+
+Prerequisite: Python 3.11 or newer and a reachable PostgreSQL database.
+
+Create and activate a virtual environment, then install dependencies:
 
 ```powershell
 python -m venv .venv
 .\.venv\Scripts\Activate.ps1
+python -m pip install -r requirements-dev.txt
+Copy-Item .env.example .env
 ```
 
-Install the runtime dependencies and start the development server:
+Set `DATABASE_URL` in `.env` for the database reachable from the host, apply the
+schema, and start the API:
 
-```bash
-python -m pip install -r requirements.txt
+```powershell
+alembic upgrade head
 uvicorn app.main:app --reload
 ```
 
-Open `http://127.0.0.1:8000/docs` for the interactive API documentation.
-
-For development, install the test dependencies and run the complete suite:
+Equivalent migration commands:
 
 ```bash
-python -m pip install -r requirements-dev.txt
-python -m pytest
+alembic current
+alembic history
+alembic upgrade head
+alembic downgrade -1
+alembic revision --autogenerate -m "describe schema change"
 ```
 
-No environment variables are required in Phase 1. `.env.example` is included as
-the placeholder for configuration introduced by future phases.
+`DATABASE_URL` is required and accepts a SQLAlchemy URL. PostgreSQL uses the
+`postgresql+psycopg://` driver. `LOG_LEVEL` defaults to `INFO`. Credentials are
+supplied only through local environment settings and are not embedded in code or
+Compose configuration.
 
-## Planned roadmap
+## Quality checks
 
-- **Phase 2:** PostgreSQL persistence and Docker-based local development
-- **Later phases:** LLM-assisted analysis and retrieval-augmented generation,
-  Kubernetes, CI/CD, cloud deployment, and observability
+Tests use a fresh in-memory SQLite database for each test through FastAPI's
+database dependency override. This keeps unit/API tests fast and deterministic
+without depending on a developer's PostgreSQL container; the production mapping
+and migration target PostgreSQL.
 
-These roadmap items are planned and are not implemented in the current version.
+```bash
+python -m pytest
+ruff check app tests migrations
+python -m compileall -q app tests migrations
+pip-audit -r requirements.txt
+```
+
+## Roadmap
+
+- **Phase 1 — complete:** FastAPI foundation and deterministic incident analysis.
+- **Phase 2 — implemented:** PostgreSQL persistence, SQLAlchemy/Alembic,
+  retrieval APIs, Docker support, structured logging, and persistence tests.
+- **Later phases:** asynchronous event processing, LLM-assisted analysis and
+  retrieval, platform deployment, CI/CD, and observability. These are explicitly
+  outside the current implementation.

@@ -33,7 +33,9 @@ RULES: tuple[AnalysisRule, ...] = (
         patterns=(
             re.compile(r"\bjwt\b", re.IGNORECASE),
             re.compile(r"\bjson web token\b", re.IGNORECASE),
-            re.compile(r"\b(?:invalid|expired|malformed) (?:access )?token\b", re.IGNORECASE),
+            re.compile(
+                r"\b(?:invalid|expired|malformed) (?:access )?token\b", re.IGNORECASE
+            ),
             re.compile(r"\btoken (?:has )?expired\b", re.IGNORECASE),
             re.compile(r"\bauthentication (?:failed|error|failure)\b", re.IGNORECASE),
             re.compile(r"\bunauthori[sz]ed\b", re.IGNORECASE),
@@ -66,7 +68,9 @@ RULES: tuple[AnalysisRule, ...] = (
                 r"(?=.*\bconnection (?:refused|reset)\b)",
                 re.IGNORECASE | re.DOTALL,
             ),
-            re.compile(r"\bconnection pool (?:exhausted|timeout|timed out)\b", re.IGNORECASE),
+            re.compile(
+                r"\bconnection pool (?:exhausted|timeout|timed out)\b", re.IGNORECASE
+            ),
             re.compile(
                 r"(?=.*\b(?:psycopg(?:2)?|sqlalchemy\.exc)\."
                 r"(?:operationalerror|interfaceerror)\b)"
