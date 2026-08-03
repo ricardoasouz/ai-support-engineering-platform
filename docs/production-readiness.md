@@ -1,7 +1,8 @@
 # Production-readiness guide
 
-Phase 7 establishes repeatable delivery and security gates; it is not a production
-deployment. The Compose stack remains a single-host development topology.
+Phases 7 and 8 establish repeatable delivery, security gates, and portable Kubernetes
+packaging; they are not a production deployment. Compose remains a single-host
+development topology and embedded Helm stateful services remain local/demo only.
 
 ## Environment profiles
 
@@ -23,8 +24,9 @@ Production must replace local single-node Kafka with a replicated, authenticated
 TLS-protected cluster and appropriate topic replication/minimum ISR. PostgreSQL needs
 managed backups, tested restoration, encrypted connections, credential rotation,
 capacity monitoring, and migration orchestration outside competing API replicas.
-Compose startup migrations are suitable locally but not a multi-replica deployment
-strategy. Configure SQLAlchemy pool sizes/timeouts against the real database budget.
+Compose startup migrations are suitable locally. Helm disables per-replica migration
+and knowledge ingestion and runs bounded release Jobs instead. Configure SQLAlchemy
+pool sizes/timeouts against the real database budget.
 
 An ingress or gateway must provide TLS, authentication/authorization, trusted proxy
 handling, rate controls, and network policy. Secrets belong in a deployment secret
@@ -53,6 +55,7 @@ conversations, and no force pushes or deletion. Require these status checks:
 - `Unit and quality gates`
 - `Supply-chain and image gates`
 - `PostgreSQL, Kafka, API, and worker`
+- `Helm, schema, and policy validation`
 
 Require branches to be current before merge, restrict administrative bypass, and
 enable private vulnerability reporting. The manual full-stack job is a release or

@@ -1,14 +1,34 @@
 # AI Support Engineering Platform
 
-Phase 7 adds deterministic delivery, security, reproducibility, and repository
-governance to the existing observable controlled-agent platform. Incident creation,
+Phase 8 adds portable Kubernetes packaging and Helm deployment architecture to the
+existing delivery-hardened controlled-agent platform. Incident creation,
 the transactional outbox, Kafka worker, grounded local RAG, human review, and Phase 6
 telemetry behavior are unchanged. Telemetry remains best-effort: an unavailable
 Collector, Prometheus, Tempo, or Grafana does not block the application plane.
 
 The default stack remains local: PostgreSQL 17 with pgvector, Apache Kafka in KRaft
 mode, Ollama, OpenTelemetry Collector, Prometheus, Tempo, and Grafana. It needs no
-cloud AI API, external API key, or vendor-specific telemetry backend.
+cloud AI API, external API key, or vendor-specific telemetry backend. Docker Compose
+remains supported; Kubernetes uses isolated storage and never reuses Compose data.
+
+## Phase 8 Kubernetes architecture
+
+```text
+Optional Ingress -> ClusterIP API -> API Deployment
+                                   |-- PostgreSQL/pgvector StatefulSet (local only)
+                                   |-- Kafka KRaft StatefulSet (local only)
+                                   `-- Ollama + persistent models (optional)
+                                               |
+Kafka incident.created -> independently scalable Worker Deployment -> Agent / RAG
+
+API + Worker -> OTel Collector -> Prometheus + Tempo -> Grafana
+```
+
+The Helm chart supports embedded local services and an external-service mode where
+Kubernetes runs only API, worker, migration/ingestion Jobs, and optional telemetry.
+Secrets are referenced out-of-band; application pods retain the Phase 7 non-root,
+read-only Distroless controls. See the [Kubernetes deployment guide](docs/kubernetes.md)
+for installation, persistence, scaling, recovery, rollout, and rollback.
 
 ## Phase 7 delivery architecture
 
@@ -561,6 +581,11 @@ python -m compileall -q app tests integration_tests scripts migrations
 python -m pip check
 pip-audit --require-hashes -r requirements.lock
 python scripts/validate_config.py --env-file .env.example
+python scripts/k8s/validate-chart.py
+helm lint deploy/helm/ai-support-platform
+helm template ai-support deploy/helm/ai-support-platform > rendered.yaml
+kubeconform -strict -summary -kubernetes-version 1.35.0 rendered.yaml
+python scripts/k8s/validate-rendered-manifests.py rendered.yaml
 docker compose config --quiet
 docker compose build api worker
 docker compose exec otel-collector /otelcol-contrib validate \
@@ -593,6 +618,8 @@ Compose and pytest commands are the same.
 | `integration.yml` | PR, `main`, manual | isolated migrations, knowledge ingestion, Kafka event flow, persistence, grounded resolution |
 | `full-stack.yml` | manual | full observability infrastructure with disclosed fake AI; optional real Ollama on a labeled self-hosted runner |
 | `release.yml` | `v*` tag | verify tag/version, repeat gates, build/scan images, produce SBOMs, metadata, and image archives |
+| `kubernetes.yml` | PR and `main` | Helm lint/render, kubeconform, policy assertions, and Trivy configuration scanning |
+| `kubernetes-integration.yml` | manual | isolated Kind incident flow, pod recovery, persistence, scaling, upgrade, and rollback |
 
 GitHub Actions are pinned to reviewed commit SHAs. Scanner containers, the Python
 builder, and the Distroless runtime use immutable image digests; their reviewed
@@ -644,9 +671,9 @@ telemetry, and database resources. SQLAlchemy pool size, overflow, connection/po
 timeouts, and recycling plus Kafka producer/consumer timeouts are configurable.
 
 Local KRaft is a plaintext single broker with replication factor one. It is not HA
-and is not a production Kafka topology. Similarly, migrations run in the API startup
-command for local convenience; a real multi-replica deployment must orchestrate them
-as a separate release step.
+and is not a production Kafka topology. Migrations run in the API startup command
+for Compose convenience; Helm disables that behavior and uses one bounded migration
+Job before normal multi-replica operation.
 
 ## Current roadmap
 
@@ -666,6 +693,9 @@ as a separate release step.
 - Phase 7 — implemented: GitHub Actions, isolated test layers, hash-locked builds,
   configuration and runtime hardening, dependency/secret/image scanning, CycloneDX
   SBOMs, versioned release artifacts, and repository governance.
-- Later phases: Kubernetes, Helm, Terraform, cloud deployment, frontend,
+- Phase 8 — implemented: portable Helm packaging, Kind tooling, explicit migration
+  and ingestion Jobs, scalable API/worker Deployments, optional local stateful and
+  observability services, security policies, and Kubernetes validation workflows.
+- Later phases: Terraform, cloud deployment, frontend,
   autonomous remediation, external LLMs, fine-tuning, and service mesh. They are
   intentionally excluded here.
