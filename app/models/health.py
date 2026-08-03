@@ -10,3 +10,11 @@ class HealthResponse(BaseModel):
 
     status: Literal["healthy"]
     service: Literal["ai-support-engineering-platform"]
+
+
+class BuildInfoResponse(BaseModel):
+    """Safe application and image build identifiers."""
+
+    version: str
+    git_sha: str
+    build_time: str

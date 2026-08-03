@@ -99,6 +99,7 @@ class KafkaEventProducer:
             "acks": settings.kafka_producer_acks,
             "enable.idempotence": settings.kafka_producer_enable_idempotence,
             "delivery.timeout.ms": settings.kafka_producer_delivery_timeout_ms,
+            "request.timeout.ms": settings.kafka_producer_request_timeout_ms,
             "retries": settings.kafka_producer_retries,
             "max.in.flight.requests.per.connection": 5,
             "logger": logging.getLogger("kafka.producer"),

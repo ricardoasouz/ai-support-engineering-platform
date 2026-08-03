@@ -1,14 +1,41 @@
 # AI Support Engineering Platform
 
-Phase 6 adds provider-neutral distributed tracing, low-cardinality operational
-metrics, and provisioned dashboards to the existing controlled support-engineering
-agent. Incident creation remains synchronous and durable. Telemetry is best-effort:
-an unavailable Collector, Prometheus, Tempo, or Grafana does not block PostgreSQL,
-Kafka, the worker, retrieval, local inference, or human review.
+Phase 7 adds deterministic delivery, security, reproducibility, and repository
+governance to the existing observable controlled-agent platform. Incident creation,
+the transactional outbox, Kafka worker, grounded local RAG, human review, and Phase 6
+telemetry behavior are unchanged. Telemetry remains best-effort: an unavailable
+Collector, Prometheus, Tempo, or Grafana does not block the application plane.
 
 The default stack remains local: PostgreSQL 17 with pgvector, Apache Kafka in KRaft
 mode, Ollama, OpenTelemetry Collector, Prometheus, Tempo, and Grafana. It needs no
 cloud AI API, external API key, or vendor-specific telemetry backend.
+
+## Phase 7 delivery architecture
+
+```text
+Pull request / main push
+        |
+        +-- CI: hash-locked install -> unit tests -> Ruff/compile -> pip audit
+        |        -> workflow validation -> Gitleaks -> Trivy filesystem/images
+        |        -> CycloneDX Python and image SBOM artifacts
+        |
+        +-- Integration: isolated Compose project
+                 PostgreSQL/pgvector + migrations + Kafka + API + worker
+                 deterministic fake AI providers -> complete cited review flow
+
+Manual dispatch                        v0.7.0 tag
+        |                                  |
+        +-- complete infrastructure        +-- quality + audit + image build/scan
+            with disclosed fake AI             + SBOM + versioned image archives
+        +-- optional labeled self-hosted
+            runner with real Ollama
+```
+
+The ordinary CI path never downloads multi-gigabyte Ollama models. Fake providers
+are deterministic, make no network calls, and are accepted only when both
+`APP_ENVIRONMENT` is `test`/`integration` and `ALLOW_FAKE_PROVIDERS=true`. The
+Docker-backed stack uses a distinct project and volumes, so it cannot modify the
+normal developer database or Kafka data.
 
 ## Phase 6 architecture
 
@@ -93,6 +120,10 @@ app/repositories/agent.py    # execution, steps, feedback, review persistence
 app/observability/           # tracing, metrics, instrumentation, context helpers
 observability/               # Collector, Prometheus, Tempo, Grafana provisioning
 migrations/versions/         # SQLAlchemy/Alembic schema history
+.github/workflows/           # quality, security, integration, full-stack, release
+docker-compose.integration.yml # isolated real-infrastructure CI topology
+scripts/validate_config.py   # secret-safe, fail-fast environment validation
+requirements*.lock           # universal, hash-locked resolved dependencies
 ```
 
 ## Controlled agent execution
@@ -510,16 +541,26 @@ intentionally absent, so logs are correlated by copying `trace_id` from Tempo in
 
 ## Quality checks
 
-Unit tests use isolated SQLite databases, fake providers, and fake Kafka components;
-the full suite does not require live PostgreSQL, Kafka, or Ollama.
+Tests have explicit layers:
+
+- `unit`: isolated SQLite, fake ports/providers/Kafka, no Docker or network;
+- `integration`: real PostgreSQL/pgvector, migrations, Kafka, API, outbox, and worker
+  in the isolated Compose project, with explicitly enabled deterministic AI;
+- `e2e`: creates an incident, waits for a grounded cited resolution, and checks the
+  durable `awaiting_review` outcome.
+
+The default full suite collects every layer but skips Docker tests unless
+`RUN_INTEGRATION_TESTS=1` is set.
 
 ```bash
+python -m pytest -m unit
 python -m pytest
-ruff check app tests migrations
-ruff format --check app tests migrations
-python -m compileall -q app tests migrations
+ruff check app tests integration_tests scripts migrations
+ruff format --check app tests integration_tests scripts migrations
+python -m compileall -q app tests integration_tests scripts migrations
 python -m pip check
-pip-audit -r requirements.txt
+pip-audit --require-hashes -r requirements.lock
+python scripts/validate_config.py --env-file .env.example
 docker compose config --quiet
 docker compose build api worker
 docker compose exec otel-collector /otelcol-contrib validate \
@@ -527,6 +568,85 @@ docker compose exec otel-collector /otelcol-contrib validate \
 docker compose exec prometheus promtool check config \
   /etc/prometheus/prometheus.yml
 ```
+
+For the isolated integration stack, set ephemeral values in the current shell (do
+not write them into version control), then run:
+
+```bash
+docker compose -p ai-support-integration -f docker-compose.integration.yml up -d --build --wait db kafka api worker
+docker compose -p ai-support-integration -f docker-compose.integration.yml exec -T api alembic current
+RUN_INTEGRATION_TESTS=1 INTEGRATION_BASE_URL=http://127.0.0.1:18000 python -m pytest -m "integration and e2e" integration_tests
+docker compose -p ai-support-integration -f docker-compose.integration.yml down --volumes
+```
+
+Required variables are `INTEGRATION_POSTGRES_USER`,
+`INTEGRATION_POSTGRES_PASSWORD`, `INTEGRATION_POSTGRES_DB`,
+`INTEGRATION_GRAFANA_ADMIN_USER`, and `INTEGRATION_GRAFANA_ADMIN_PASSWORD`. PowerShell
+uses `$env:NAME = "value"` and `$env:RUN_INTEGRATION_TESTS = "1"`; the remaining
+Compose and pytest commands are the same.
+
+## CI, security, and supply chain
+
+| Workflow | Trigger | Purpose |
+| --- | --- | --- |
+| `ci.yml` | PR and `main` | unit/quality gates, pip-audit, Actionlint, Gitleaks, Trivy, image builds, SBOMs |
+| `integration.yml` | PR, `main`, manual | isolated migrations, knowledge ingestion, Kafka event flow, persistence, grounded resolution |
+| `full-stack.yml` | manual | full observability infrastructure with disclosed fake AI; optional real Ollama on a labeled self-hosted runner |
+| `release.yml` | `v*` tag | verify tag/version, repeat gates, build/scan images, produce SBOMs, metadata, and image archives |
+
+GitHub Actions are pinned to reviewed commit SHAs. Scanner containers, the Python
+builder, and the Distroless runtime use immutable image digests; their reviewed
+tool releases are Trivy 0.73.0, Gitleaks 8.30.1, and Actionlint 1.7.12. Trivy fails
+on `HIGH`/`CRITICAL` dependency and image vulnerabilities, Gitleaks scans repository
+history with redacted output, and pip-audit gates the hash-locked runtime graph. No
+exception/ignore file is present. Generated scan output and SBOMs are ignored locally
+and uploaded as short-retention workflow artifacts.
+
+`requirements.txt` and `requirements-dev.txt` remain the readable direct dependency
+sources. `requirements.lock` and `requirements-dev.lock` are universal Python 3.14
+resolutions with hashes and are the install inputs for containers and CI. After an
+intentional dependency edit, regenerate and review the locks:
+
+```bash
+uv pip compile requirements.txt --universal --python-version 3.14 --generate-hashes -o requirements.lock
+uv pip compile requirements-dev.txt --universal --python-version 3.14 --generate-hashes -o requirements-dev.lock
+```
+
+The root `VERSION` is authoritative. FastAPI metadata, `GET /build`, startup logs,
+and OCI labels consume it. Builds accept safe `GIT_SHA` and RFC 3339 `BUILD_TIME`
+values; absent or malformed values are reported as `unknown`. Compose supports
+configurable repository and tag values; releases use the semantic version and Git
+SHA and do not publish to a registry.
+
+## Environment and runtime hardening
+
+The supported profiles are `development`, `test`, `integration`, and
+`production-like`; their trust and infrastructure assumptions are documented in
+[`docs/production-readiness.md`](docs/production-readiness.md). Configuration rejects
+fake providers outside CI profiles, SQLite in production-like mode, unsafe Kafka
+idempotence/timeouts, and inconsistent agent budgets. The validation command also
+checks required Compose/Grafana settings without displaying their values and rejects
+placeholder credentials for production-like rehearsals.
+
+The API sets `X-Content-Type-Options`, `Referrer-Policy`, `X-Frame-Options`, and a
+restrictive `Permissions-Policy`. CSP is omitted intentionally so Swagger UI keeps
+working. Requests are capped at 24 KiB by default, including streamed bodies;
+incident fields and pagination already have schema limits. Authentication, TLS, and
+rate limiting remain deployment-layer gaps rather than pretend controls.
+
+API and worker containers share a minimal Distroless Debian 13 runtime and run as
+numeric UID/GID 10001, with a read-only root filesystem, bounded no-exec `/tmp`, all Linux capabilities dropped,
+`no-new-privileges`, an init process, health checks, and 30-second stop grace periods.
+The API stops the outbox retry thread, flushes its producer, shuts telemetry down
+best-effort, and disposes database pools. The worker stops polling on SIGTERM/SIGINT,
+finishes the current bounded message path, closes Kafka, both provider clients,
+telemetry, and database resources. SQLAlchemy pool size, overflow, connection/pool
+timeouts, and recycling plus Kafka producer/consumer timeouts are configurable.
+
+Local KRaft is a plaintext single broker with replication factor one. It is not HA
+and is not a production Kafka topology. Similarly, migrations run in the API startup
+command for local convenience; a real multi-replica deployment must orchestrate them
+as a separate release step.
 
 ## Current roadmap
 
@@ -540,9 +660,12 @@ docker compose exec prometheus promtool check config \
 - Phase 5 — complete: bounded support agent, typed evidence tools, versioned
   planner/resolver prompts, audit ledger, guardrails, human review, feedback export,
   golden evaluation, and execution metadata.
-- Phase 6 — implemented: OpenTelemetry trace propagation, low-cardinality OTLP
+- Phase 6 — complete: OpenTelemetry trace propagation, low-cardinality OTLP
   metrics, Collector, Prometheus, Tempo, provisioned Grafana dashboards, and
   trace/log correlation.
-- Later phases: Kubernetes, Helm, Terraform, cloud deployment, CI/CD, frontend,
+- Phase 7 — implemented: GitHub Actions, isolated test layers, hash-locked builds,
+  configuration and runtime hardening, dependency/secret/image scanning, CycloneDX
+  SBOMs, versioned release artifacts, and repository governance.
+- Later phases: Kubernetes, Helm, Terraform, cloud deployment, frontend,
   autonomous remediation, external LLMs, fine-tuning, and service mesh. They are
   intentionally excluded here.

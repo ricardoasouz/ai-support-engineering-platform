@@ -1,0 +1,67 @@
+name: Release artifacts
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: read
+
+jobs:
+  release:
+    name: Validate and package release
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Set up Python
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.14"
+          cache: pip
+          cache-dependency-path: requirements-dev.lock
+      - name: Install hash-locked dependencies
+        run: python -m pip install --require-hashes --requirement requirements-dev.lock
+      - name: Validate release version
+        shell: bash
+        run: |
+          version="$(tr -d '\r\n' < VERSION)"
+          test "$GITHUB_REF_NAME" = "v$version"
+          echo "APP_VERSION=$version" >> "$GITHUB_ENV"
+          echo "BUILD_TIME=$(git show -s --format=%cI HEAD)" >> "$GITHUB_ENV"
+      - name: Run release quality gates
+        run: |
+          python -m pytest -m unit -q
+          python -m ruff check app tests integration_tests scripts migrations
+          python -m ruff format --check app tests integration_tests scripts migrations
+          python -m compileall -q app tests integration_tests scripts migrations
+          python -m pip check
+          python -m pip_audit --require-hashes --requirement requirements.lock
+      - name: Build immutable release images
+        run: |
+          docker build --build-arg APP_VERSION="$APP_VERSION" --build-arg GIT_SHA="$GITHUB_SHA" --build-arg BUILD_TIME="$BUILD_TIME" --tag "ai-support-api:$APP_VERSION" --tag "ai-support-api:$GITHUB_SHA" .
+          docker build --build-arg APP_VERSION="$APP_VERSION" --build-arg GIT_SHA="$GITHUB_SHA" --build-arg BUILD_TIME="$BUILD_TIME" --tag "ai-support-worker:$APP_VERSION" --tag "ai-support-worker:$GITHUB_SHA" .
+      - name: Scan release images
+        run: |
+          docker run --rm -v /var/run/docker.sock:/var/run/docker.sock aquasec/trivy@sha256:7cced7cae583819fc7806d4cbc0dbbc7cad18b99f7d3e235192e6da8c091045c image --exit-code 1 --severity HIGH,CRITICAL --scanners vuln "ai-support-api:$APP_VERSION"
+          docker run --rm -v /var/run/docker.sock:/var/run/docker.sock aquasec/trivy@sha256:7cced7cae583819fc7806d4cbc0dbbc7cad18b99f7d3e235192e6da8c091045c image --exit-code 1 --severity HIGH,CRITICAL --scanners vuln "ai-support-worker:$APP_VERSION"
+      - name: Generate release metadata and SBOMs
+        shell: bash
+        run: |
+          mkdir -p release
+          cyclonedx-py requirements requirements.lock --output-reproducible --of JSON -o release/python.cdx.json
+          docker run --rm -v /var/run/docker.sock:/var/run/docker.sock -v "$PWD/release:/release" aquasec/trivy@sha256:7cced7cae583819fc7806d4cbc0dbbc7cad18b99f7d3e235192e6da8c091045c image --format cyclonedx --output /release/api-image.cdx.json "ai-support-api:$APP_VERSION"
+          docker run --rm -v /var/run/docker.sock:/var/run/docker.sock -v "$PWD/release:/release" aquasec/trivy@sha256:7cced7cae583819fc7806d4cbc0dbbc7cad18b99f7d3e235192e6da8c091045c image --format cyclonedx --output /release/worker-image.cdx.json "ai-support-worker:$APP_VERSION"
+          printf '{"version":"%s","git_sha":"%s","build_time":"%s","publication":"not-published"}\n' "$APP_VERSION" "$GITHUB_SHA" "$BUILD_TIME" > release/build-metadata.json
+          docker save "ai-support-api:$APP_VERSION" | gzip -9 > release/api-image.tar.gz
+          docker save "ai-support-worker:$APP_VERSION" | gzip -9 > release/worker-image.tar.gz
+      - name: Upload release artifacts
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: ai-support-platform-${{ github.ref_name }}
+          path: release/
+          if-no-files-found: error
+          retention-days: 30

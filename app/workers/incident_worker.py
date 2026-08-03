@@ -9,7 +9,7 @@ from app.agent.workflow import AgentLimits, ControlledAgentWorkflow
 from app.ai.providers.factory import create_embedding_provider, create_llm_provider
 from app.core.config import get_settings
 from app.core.logging import configure_logging
-from app.db.session import get_session_factory
+from app.db.session import dispose_engine, get_session_factory
 from app.knowledge.retrieval import KnowledgeRetriever
 from app.observability import configure_observability, shutdown_observability
 from app.workers.processor import IncidentEventProcessor
@@ -35,6 +35,7 @@ def main() -> None:
 
     session_factory = get_session_factory()
     embedding_provider = create_embedding_provider(settings)
+    llm_provider = create_llm_provider(settings)
     workflow = ControlledAgentWorkflow(
         session_factory,
         KnowledgeRetriever(
@@ -42,7 +43,7 @@ def main() -> None:
             embedding_provider,
             settings.knowledge_retrieval_top_k,
         ),
-        create_llm_provider(settings),
+        llm_provider,
         AgentLimits(
             max_steps=settings.agent_max_steps,
             max_tool_calls=settings.agent_max_tool_calls,
@@ -74,7 +75,10 @@ def main() -> None:
         worker.run(stop, on_ready=mark_ready)
     finally:
         WORKER_READY_FILE.unlink(missing_ok=True)
+        llm_provider.close()
+        embedding_provider.close()
         shutdown_observability()
+        dispose_engine()
 
 
 if __name__ == "__main__":

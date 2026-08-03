@@ -123,6 +123,8 @@ class KafkaIncidentWorker:
             "enable.auto.offset.store": False,
             "auto.offset.reset": "earliest",
             "max.poll.interval.ms": settings.kafka_worker_max_poll_interval_ms,
+            "session.timeout.ms": settings.kafka_consumer_session_timeout_ms,
+            "heartbeat.interval.ms": settings.kafka_consumer_heartbeat_interval_ms,
             "logger": logging.getLogger("kafka.consumer"),
         }
         if consumer is None:

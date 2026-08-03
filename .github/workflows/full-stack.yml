@@ -1,0 +1,128 @@
+name: Manual full stack
+
+on:
+  workflow_dispatch:
+    inputs:
+      run_real_ollama:
+        description: Also run the real-model job on a labeled self-hosted runner
+        required: false
+        default: false
+        type: boolean
+
+permissions:
+  contents: read
+
+jobs:
+  hosted-fake-provider:
+    name: Full infrastructure with deterministic providers
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Set up Python
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.14"
+      - name: Install hash-locked test dependencies
+        run: python -m pip install --require-hashes --requirement requirements-dev.lock
+      - name: Create ephemeral full-stack credentials
+        shell: bash
+        run: |
+          db_password="$(openssl rand -hex 24)"
+          grafana_password="$(openssl rand -hex 24)"
+          echo "::add-mask::$db_password"
+          echo "::add-mask::$grafana_password"
+          {
+            echo "INTEGRATION_POSTGRES_USER=full_user"
+            echo "INTEGRATION_POSTGRES_PASSWORD=$db_password"
+            echo "INTEGRATION_POSTGRES_DB=full_platform"
+            echo "INTEGRATION_GRAFANA_ADMIN_USER=full_admin"
+            echo "INTEGRATION_GRAFANA_ADMIN_PASSWORD=$grafana_password"
+            echo "INTEGRATION_OTEL_TRACES_EXPORTER=otlp"
+            echo "INTEGRATION_OTEL_METRICS_EXPORTER=otlp"
+            echo "APP_VERSION=$(tr -d '\r\n' < VERSION)"
+            echo "GIT_SHA=$GITHUB_SHA"
+            echo "BUILD_TIME=$(git show -s --format=%cI HEAD)"
+          } >> "$GITHUB_ENV"
+      - name: Start full hosted stack
+        run: docker compose -p ai-support-full-fake -f docker-compose.integration.yml --profile full up -d --build --wait
+      - name: Run end-to-end incident flow
+        env:
+          RUN_INTEGRATION_TESTS: "1"
+          INTEGRATION_BASE_URL: http://127.0.0.1:18000
+        run: python -m pytest -m "integration and e2e" integration_tests -q
+      - name: Verify observability services
+        run: |
+          curl --fail --silent http://127.0.0.1:13000/api/health
+          curl --fail --silent http://127.0.0.1:13200/ready
+          curl --fail --silent http://127.0.0.1:19090/-/ready
+      - name: Publish provider disclosure
+        run: echo "This hosted job used deterministic fake AI providers; Ollama inference was not exercised." >> "$GITHUB_STEP_SUMMARY"
+      - name: Capture failure diagnostics
+        if: failure()
+        run: |
+          mkdir -p ci-artifacts
+          docker compose -p ai-support-full-fake -f docker-compose.integration.yml --profile full ps --all > ci-artifacts/compose-ps.txt
+          docker compose -p ai-support-full-fake -f docker-compose.integration.yml --profile full logs --no-color api worker kafka otel-collector tempo grafana > ci-artifacts/runtime.log
+      - name: Upload failure diagnostics
+        if: failure()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: full-stack-diagnostics-${{ github.sha }}
+          path: ci-artifacts/
+          retention-days: 7
+      - name: Remove ephemeral hosted stack
+        if: always()
+        run: docker compose -p ai-support-full-fake -f docker-compose.integration.yml --profile full down --volumes --remove-orphans
+
+  self-hosted-real-ollama:
+    if: ${{ inputs.run_real_ollama }}
+    name: Real Ollama integration (self-hosted)
+    runs-on: [self-hosted, linux, x64, ollama]
+    timeout-minutes: 90
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Set up Python
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.14"
+      - name: Install hash-locked test dependencies
+        run: python -m pip install --require-hashes --requirement requirements-dev.lock
+      - name: Create isolated real-model credentials
+        shell: bash
+        run: |
+          db_password="$(openssl rand -hex 24)"
+          grafana_password="$(openssl rand -hex 24)"
+          echo "::add-mask::$db_password"
+          echo "::add-mask::$grafana_password"
+          {
+            echo "POSTGRES_USER=real_ci_user"
+            echo "POSTGRES_PASSWORD=$db_password"
+            echo "POSTGRES_DB=real_ci_platform"
+            echo "GRAFANA_ADMIN_USER=real_ci_admin"
+            echo "GRAFANA_ADMIN_PASSWORD=$grafana_password"
+            echo "API_PORT=18001"
+            echo "GRAFANA_PORT=13001"
+            echo "APP_VERSION=$(tr -d '\r\n' < VERSION)"
+            echo "GIT_SHA=$GITHUB_SHA"
+            echo "BUILD_TIME=$(git show -s --format=%cI HEAD)"
+          } >> "$GITHUB_ENV"
+      - name: Start isolated real-Ollama stack
+        run: docker compose -p ai-support-full-real up -d --build --wait
+      - name: Run real incident flow
+        env:
+          RUN_INTEGRATION_TESTS: "1"
+          INTEGRATION_BASE_URL: http://127.0.0.1:18001
+          INTEGRATION_TIMEOUT_SECONDS: "600"
+        run: python -m pytest -m "integration and e2e" integration_tests -q
+      - name: Publish provider disclosure
+        run: echo "This self-hosted job started the configured Ollama models and exercised a real incident submission." >> "$GITHUB_STEP_SUMMARY"
+      - name: Remove isolated real-model stack
+        if: always()
+        run: docker compose -p ai-support-full-real down --volumes --remove-orphans

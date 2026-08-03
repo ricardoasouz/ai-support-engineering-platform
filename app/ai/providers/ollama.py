@@ -99,6 +99,10 @@ class _OllamaHTTPClient:
             raise ProviderResponseError("Ollama returned a non-object JSON response")
         return body
 
+    def close(self) -> None:
+        """Close pooled HTTP connections."""
+        self.client.close()
+
 
 class OllamaLLMProvider:
     """Use Ollama's chat endpoint with native JSON-schema constraints."""
@@ -239,6 +243,10 @@ class OllamaLLMProvider:
                 f"Ollama structured output failed validation: {exc}"
             ) from exc
 
+    def close(self) -> None:
+        """Release the underlying HTTP connection pool."""
+        self._http.close()
+
 
 class OllamaEmbeddingProvider:
     """Use Ollama's batch embedding endpoint with strict dimension validation."""
@@ -336,3 +344,7 @@ class OllamaEmbeddingProvider:
                 )
             validated.append(values)
         return validated
+
+    def close(self) -> None:
+        """Release the underlying HTTP connection pool."""
+        self._http.close()

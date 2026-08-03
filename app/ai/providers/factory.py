@@ -1,6 +1,10 @@
 """Construct configured production AI providers."""
 
 from app.ai.providers.base import EmbeddingProvider, LLMProvider
+from app.ai.providers.fake import (
+    DeterministicFakeEmbeddingProvider,
+    DeterministicFakeLLMProvider,
+)
 from app.ai.providers.ollama import OllamaEmbeddingProvider, OllamaLLMProvider
 from app.core.config import Settings
 
@@ -13,6 +17,8 @@ def create_llm_provider(settings: Settings) -> LLMProvider:
             settings.ollama_llm_model,
             settings.ollama_request_timeout_seconds,
         )
+    if settings.llm_provider == "fake":
+        return DeterministicFakeLLMProvider()
     raise ValueError(f"Unsupported LLM provider: {settings.llm_provider}")
 
 
@@ -25,4 +31,6 @@ def create_embedding_provider(settings: Settings) -> EmbeddingProvider:
             settings.embedding_dimensions,
             settings.ollama_request_timeout_seconds,
         )
+    if settings.embedding_provider == "fake":
+        return DeterministicFakeEmbeddingProvider(settings.embedding_dimensions)
     raise ValueError(f"Unsupported embedding provider: {settings.embedding_provider}")

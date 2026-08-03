@@ -1,0 +1,35 @@
+name: Bug report
+description: Report a reproducible product or operational defect
+title: "[Bug]: "
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: Do not include credentials, private incident logs, or undisclosed vulnerabilities.
+  - type: textarea
+    id: behavior
+    attributes:
+      label: Observed behavior
+      description: Include sanitized logs, endpoint, and relevant version/build metadata.
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior
+    validations:
+      required: true
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: Reproduction
+      description: Provide the smallest safe sequence that reproduces the problem.
+    validations:
+      required: true
+  - type: dropdown
+    id: profile
+    attributes:
+      label: Environment profile
+      options: [development, test, integration, production-like]
+    validations:
+      required: true

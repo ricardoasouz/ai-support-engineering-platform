@@ -4,7 +4,7 @@ from functools import lru_cache
 from pathlib import Path
 from typing import Literal
 
-from pydantic import Field
+from pydantic import Field, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -18,10 +18,44 @@ class Settings(BaseSettings):
     )
 
     database_url: str = Field(validation_alias="DATABASE_URL", min_length=1)
+    app_environment: Literal[
+        "development", "test", "integration", "production-like"
+    ] = Field(default="development", validation_alias="APP_ENVIRONMENT")
+    database_pool_size: int = Field(
+        default=10, validation_alias="DATABASE_POOL_SIZE", ge=1, le=100
+    )
+    database_max_overflow: int = Field(
+        default=10, validation_alias="DATABASE_MAX_OVERFLOW", ge=0, le=200
+    )
+    database_pool_timeout_seconds: float = Field(
+        default=30.0,
+        validation_alias="DATABASE_POOL_TIMEOUT_SECONDS",
+        ge=1,
+        le=300,
+    )
+    database_pool_recycle_seconds: int = Field(
+        default=1_800,
+        validation_alias="DATABASE_POOL_RECYCLE_SECONDS",
+        ge=30,
+        le=86_400,
+    )
+    database_connect_timeout_seconds: int = Field(
+        default=10,
+        validation_alias="DATABASE_CONNECT_TIMEOUT_SECONDS",
+        ge=1,
+        le=120,
+    )
     log_level: Literal["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"] = Field(
         default="INFO",
         validation_alias="LOG_LEVEL",
     )
+    api_max_request_body_bytes: int = Field(
+        default=24_576,
+        validation_alias="API_MAX_REQUEST_BODY_BYTES",
+        ge=21_000,
+        le=1_048_576,
+    )
+    api_workers: int = Field(default=2, validation_alias="API_WORKERS", ge=1, le=16)
     otel_service_name: str = Field(
         default="ai-support-api",
         validation_alias="OTEL_SERVICE_NAME",
@@ -88,6 +122,12 @@ class Settings(BaseSettings):
         validation_alias="KAFKA_PRODUCER_RETRIES",
         ge=0,
     )
+    kafka_producer_request_timeout_ms: int = Field(
+        default=3_000,
+        validation_alias="KAFKA_PRODUCER_REQUEST_TIMEOUT_MS",
+        ge=1_000,
+        le=300_000,
+    )
     kafka_outbox_poll_interval_seconds: float = Field(
         default=5.0,
         validation_alias="KAFKA_OUTBOX_POLL_INTERVAL_SECONDS",
@@ -119,10 +159,26 @@ class Settings(BaseSettings):
         validation_alias="KAFKA_WORKER_RETRY_BACKOFF_SECONDS",
         gt=0,
     )
-    llm_provider: Literal["ollama"] = Field(
+    kafka_consumer_session_timeout_ms: int = Field(
+        default=45_000,
+        validation_alias="KAFKA_CONSUMER_SESSION_TIMEOUT_MS",
+        ge=6_000,
+        le=300_000,
+    )
+    kafka_consumer_heartbeat_interval_ms: int = Field(
+        default=3_000,
+        validation_alias="KAFKA_CONSUMER_HEARTBEAT_INTERVAL_MS",
+        ge=1_000,
+        le=100_000,
+    )
+    allow_fake_providers: bool = Field(
+        default=False,
+        validation_alias="ALLOW_FAKE_PROVIDERS",
+    )
+    llm_provider: Literal["ollama", "fake"] = Field(
         default="ollama", validation_alias="LLM_PROVIDER"
     )
-    embedding_provider: Literal["ollama"] = Field(
+    embedding_provider: Literal["ollama", "fake"] = Field(
         default="ollama", validation_alias="EMBEDDING_PROVIDER"
     )
     ollama_base_url: str = Field(
@@ -232,6 +288,41 @@ class Settings(BaseSettings):
     agent_resolver_prompt_version: Literal["v1"] = Field(
         default="v1", validation_alias="AGENT_RESOLVER_PROMPT_VERSION"
     )
+
+    @model_validator(mode="after")
+    def validate_runtime_invariants(self) -> "Settings":
+        """Reject unsafe cross-field combinations without printing secret values."""
+        fake_selected = "fake" in {self.llm_provider, self.embedding_provider}
+        if fake_selected and not self.allow_fake_providers:
+            raise ValueError("Fake providers require ALLOW_FAKE_PROVIDERS=true")
+        if fake_selected and self.app_environment not in {"test", "integration"}:
+            raise ValueError(
+                "Fake providers are limited to test and integration profiles"
+            )
+        if (
+            self.app_environment == "production-like"
+            and not self.database_url.startswith(
+                ("postgresql://", "postgresql+psycopg://")
+            )
+        ):
+            raise ValueError("Production-like configuration requires PostgreSQL")
+        if self.kafka_producer_enable_idempotence and self.kafka_producer_acks != "all":
+            raise ValueError("Idempotent Kafka production requires acknowledgments=all")
+        if (
+            self.kafka_producer_request_timeout_ms
+            > self.kafka_producer_delivery_timeout_ms
+        ):
+            raise ValueError("Kafka request timeout cannot exceed delivery timeout")
+        if (
+            self.kafka_consumer_heartbeat_interval_ms * 3
+            > self.kafka_consumer_session_timeout_ms
+        ):
+            raise ValueError("Kafka heartbeat interval is too high for session timeout")
+        if self.agent_max_tool_calls >= self.agent_max_steps:
+            raise ValueError("Agent steps must reserve capacity for a final action")
+        if self.agent_tool_timeout_seconds > self.agent_max_duration_seconds:
+            raise ValueError("Agent tool timeout cannot exceed total agent duration")
+        return self
 
 
 @lru_cache

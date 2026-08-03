@@ -1,0 +1,83 @@
+name: Integration
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: integration-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  integration:
+    name: PostgreSQL, Kafka, API, and worker
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Set up Python
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.14"
+          cache: pip
+          cache-dependency-path: requirements-dev.lock
+      - name: Install hash-locked test dependencies
+        run: python -m pip install --require-hashes --requirement requirements-dev.lock
+      - name: Create ephemeral integration credentials
+        shell: bash
+        run: |
+          db_password="$(openssl rand -hex 24)"
+          grafana_password="$(openssl rand -hex 24)"
+          echo "::add-mask::$db_password"
+          echo "::add-mask::$grafana_password"
+          {
+            echo "INTEGRATION_POSTGRES_USER=integration_user"
+            echo "INTEGRATION_POSTGRES_PASSWORD=$db_password"
+            echo "INTEGRATION_POSTGRES_DB=integration_platform"
+            echo "INTEGRATION_GRAFANA_ADMIN_USER=integration_admin"
+            echo "INTEGRATION_GRAFANA_ADMIN_PASSWORD=$grafana_password"
+            echo "APP_VERSION=$(tr -d '\r\n' < VERSION)"
+            echo "GIT_SHA=$GITHUB_SHA"
+            echo "BUILD_TIME=$(git show -s --format=%cI HEAD)"
+          } >> "$GITHUB_ENV"
+      - name: Validate integration Compose model
+        run: docker compose -p ai-support-ci -f docker-compose.integration.yml config --quiet
+      - name: Start reduced integration stack
+        run: docker compose -p ai-support-ci -f docker-compose.integration.yml up -d --build --wait db kafka api worker
+      - name: Validate migrations and knowledge ingestion
+        shell: bash
+        run: |
+          docker compose -p ai-support-ci -f docker-compose.integration.yml exec -T api alembic current
+          docker compose -p ai-support-ci -f docker-compose.integration.yml exec -T api alembic check
+          chunk_count="$(docker compose -p ai-support-ci -f docker-compose.integration.yml exec -T db psql -U "$INTEGRATION_POSTGRES_USER" -d "$INTEGRATION_POSTGRES_DB" -tAc 'select count(*) from knowledge_chunks')"
+          test "$chunk_count" -gt 0
+      - name: Run event-flow integration smoke test
+        env:
+          RUN_INTEGRATION_TESTS: "1"
+          INTEGRATION_BASE_URL: http://127.0.0.1:18000
+        run: python -m pytest -m "integration and e2e" integration_tests -q
+      - name: Capture failure diagnostics
+        if: failure()
+        run: |
+          mkdir -p ci-artifacts
+          docker compose -p ai-support-ci -f docker-compose.integration.yml ps --all > ci-artifacts/compose-ps.txt
+          docker compose -p ai-support-ci -f docker-compose.integration.yml logs --no-color api worker kafka > ci-artifacts/runtime.log
+      - name: Upload failure diagnostics
+        if: failure()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: integration-diagnostics-${{ github.sha }}
+          path: ci-artifacts/
+          if-no-files-found: warn
+          retention-days: 7
+      - name: Remove ephemeral integration stack
+        if: always()
+        run: docker compose -p ai-support-ci -f docker-compose.integration.yml down --volumes --remove-orphans

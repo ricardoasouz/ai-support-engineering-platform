@@ -30,6 +30,10 @@ coverage.xml
 htmlcov/
 junit.xml
 evaluation_reports/
+security-reports/
+ci-artifacts/
+*.sarif
+sbom*.json
 build/
 dist/
 *.egg-info/

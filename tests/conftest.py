@@ -21,6 +21,15 @@ from app.events.dispatcher import DispatchOutcome
 from app.main import app
 
 
+def pytest_collection_modifyitems(items: list[pytest.Item]) -> None:
+    """Treat existing deterministic tests as unit tests unless explicitly layered."""
+    for item in items:
+        if not any(
+            item.get_closest_marker(marker) for marker in ("unit", "integration", "e2e")
+        ):
+            item.add_marker(pytest.mark.unit)
+
+
 class DeferredTestDispatcher:
     """Keep API tests broker-independent while preserving durable outbox rows."""
 

@@ -1,0 +1,272 @@
+x-integration-environment: &integration-environment
+  DATABASE_URL: postgresql+psycopg://${INTEGRATION_POSTGRES_USER:?Set INTEGRATION_POSTGRES_USER}:${INTEGRATION_POSTGRES_PASSWORD:?Set INTEGRATION_POSTGRES_PASSWORD}@db:5432/${INTEGRATION_POSTGRES_DB:?Set INTEGRATION_POSTGRES_DB}
+  APP_ENVIRONMENT: integration
+  LOG_LEVEL: INFO
+  API_MAX_REQUEST_BODY_BYTES: 24576
+  API_WORKERS: 1
+  DATABASE_POOL_SIZE: 5
+  DATABASE_MAX_OVERFLOW: 5
+  DATABASE_POOL_TIMEOUT_SECONDS: 15
+  DATABASE_POOL_RECYCLE_SECONDS: 1800
+  DATABASE_CONNECT_TIMEOUT_SECONDS: 5
+  KAFKA_ENABLED: "true"
+  KAFKA_BOOTSTRAP_SERVERS: kafka:9092
+  KAFKA_INCIDENT_CREATED_TOPIC: incident.created
+  KAFKA_TOPIC_PARTITIONS: 3
+  KAFKA_CONSUMER_GROUP: incident-processing-integration-v1
+  KAFKA_PRODUCER_CLIENT_ID: support-api-integration
+  KAFKA_PRODUCER_ACKS: all
+  KAFKA_PRODUCER_ENABLE_IDEMPOTENCE: "true"
+  KAFKA_PRODUCER_DELIVERY_TIMEOUT_MS: 5000
+  KAFKA_PRODUCER_REQUEST_TIMEOUT_MS: 3000
+  KAFKA_PRODUCER_RETRIES: 5
+  KAFKA_OUTBOX_POLL_INTERVAL_SECONDS: 1
+  KAFKA_OUTBOX_BATCH_SIZE: 20
+  KAFKA_WORKER_CLIENT_ID: incident-worker-integration
+  KAFKA_WORKER_POLL_TIMEOUT_SECONDS: 0.5
+  KAFKA_WORKER_MAX_POLL_INTERVAL_MS: 900000
+  KAFKA_WORKER_RETRY_BACKOFF_SECONDS: 1
+  KAFKA_CONSUMER_SESSION_TIMEOUT_MS: 45000
+  KAFKA_CONSUMER_HEARTBEAT_INTERVAL_MS: 3000
+  ALLOW_FAKE_PROVIDERS: "true"
+  LLM_PROVIDER: fake
+  EMBEDDING_PROVIDER: fake
+  EMBEDDING_DIMENSIONS: 768
+  KNOWLEDGE_BASE_PATH: /app/knowledge_base
+  KNOWLEDGE_CHUNK_SIZE: 900
+  KNOWLEDGE_RETRIEVAL_TOP_K: 4
+  AI_MAX_ATTEMPTS: 5
+  AI_PROCESSING_STALE_SECONDS: 120
+  AGENT_MAX_STEPS: 8
+  AGENT_MAX_TOOL_CALLS: 6
+  AGENT_MAX_REPEATED_TOOL_CALLS: 1
+  AGENT_MAX_RETRIEVAL_CHUNKS: 4
+  AGENT_MAX_DURATION_SECONDS: 120
+  AGENT_TOOL_TIMEOUT_SECONDS: 30
+  AGENT_MODEL_RETRIES: 3
+  AGENT_REPAIR_ATTEMPTS: 2
+  AGENT_PLANNER_PROMPT_VERSION: v2
+  AGENT_RESOLVER_PROMPT_VERSION: v1
+  OLLAMA_BASE_URL: http://ollama:11434
+  OLLAMA_LLM_MODEL: qwen2.5:1.5b-instruct
+  OLLAMA_EMBEDDING_MODEL: nomic-embed-text:v1.5
+  OLLAMA_REQUEST_TIMEOUT_SECONDS: 180
+  OTEL_EXPORTER_OTLP_ENDPOINT: http://otel-collector:4317
+  OTEL_TRACES_EXPORTER: ${INTEGRATION_OTEL_TRACES_EXPORTER:-none}
+  OTEL_METRICS_EXPORTER: ${INTEGRATION_OTEL_METRICS_EXPORTER:-none}
+  OTEL_RESOURCE_ATTRIBUTES: deployment.environment.name=integration,service.namespace=ai-support-platform
+  GIT_SHA: ${GIT_SHA:-unknown}
+  BUILD_TIME: ${BUILD_TIME:-unknown}
+
+services:
+  db:
+    image: pgvector/pgvector:0.8.5-pg17-trixie
+    environment:
+      POSTGRES_USER: ${INTEGRATION_POSTGRES_USER:?Set INTEGRATION_POSTGRES_USER}
+      POSTGRES_PASSWORD: ${INTEGRATION_POSTGRES_PASSWORD:?Set INTEGRATION_POSTGRES_PASSWORD}
+      POSTGRES_DB: ${INTEGRATION_POSTGRES_DB:?Set INTEGRATION_POSTGRES_DB}
+    volumes:
+      - integration_postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $$POSTGRES_USER -d $$POSTGRES_DB"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+      start_period: 10s
+
+  kafka:
+    image: apache/kafka:4.3.1
+    hostname: kafka
+    environment:
+      KAFKA_NODE_ID: 1
+      KAFKA_PROCESS_ROLES: broker,controller
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT
+      KAFKA_LISTENERS: PLAINTEXT://:9092,CONTROLLER://:9093
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:9092
+      KAFKA_INTER_BROKER_LISTENER_NAME: PLAINTEXT
+      KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
+      KAFKA_CONTROLLER_QUORUM_VOTERS: 1@kafka:9093
+      CLUSTER_ID: MkU3OEVBNTcwNTJENDM2Qk
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
+      KAFKA_SHARE_COORDINATOR_STATE_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_SHARE_COORDINATOR_STATE_TOPIC_MIN_ISR: 1
+      KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: 0
+      KAFKA_DEFAULT_REPLICATION_FACTOR: 1
+      KAFKA_NUM_PARTITIONS: 3
+      KAFKA_AUTO_CREATE_TOPICS_ENABLE: "true"
+      KAFKA_LOG_DIRS: /var/lib/kafka/data
+    volumes:
+      - integration_kafka_data:/var/lib/kafka
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - /opt/kafka/bin/kafka-topics.sh --bootstrap-server localhost:9092 --list >/dev/null 2>&1
+      interval: 10s
+      timeout: 10s
+      retries: 12
+      start_period: 20s
+
+  api:
+    image: ai-support-platform-api:${IMAGE_TAG:-integration}
+    build:
+      context: .
+      args:
+        APP_VERSION: ${APP_VERSION:-0.7.0}
+        GIT_SHA: ${GIT_SHA:-unknown}
+        BUILD_TIME: ${BUILD_TIME:-unknown}
+    environment:
+      <<: *integration-environment
+      OTEL_SERVICE_NAME: ai-support-api
+    command: ["-m", "app.runtime", "api"]
+    ports:
+      - "${INTEGRATION_API_PORT:-18000}:8000"
+    init: true
+    read_only: true
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,size=64m
+    cap_drop: ["ALL"]
+    security_opt: ["no-new-privileges:true"]
+    depends_on:
+      db:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=2)"]
+      interval: 5s
+      timeout: 3s
+      retries: 12
+      start_period: 10s
+    stop_grace_period: 30s
+
+  worker:
+    image: ai-support-platform-worker:${IMAGE_TAG:-integration}
+    build:
+      context: .
+      args:
+        APP_VERSION: ${APP_VERSION:-0.7.0}
+        GIT_SHA: ${GIT_SHA:-unknown}
+        BUILD_TIME: ${BUILD_TIME:-unknown}
+    environment:
+      <<: *integration-environment
+      OTEL_SERVICE_NAME: ai-support-worker
+    command: ["-m", "app.runtime", "worker"]
+    init: true
+    read_only: true
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,size=64m
+    cap_drop: ["ALL"]
+    security_opt: ["no-new-privileges:true"]
+    depends_on:
+      db:
+        condition: service_healthy
+      kafka:
+        condition: service_healthy
+      api:
+        condition: service_healthy
+    healthcheck:
+      test:
+        - CMD
+        - /usr/local/bin/python
+        - -c
+        - from pathlib import Path; raise SystemExit(not Path('/tmp/incident-worker-ready').is_file())
+      interval: 5s
+      timeout: 3s
+      retries: 12
+      start_period: 15s
+    stop_grace_period: 30s
+
+  ollama:
+    profiles: ["full"]
+    image: ollama/ollama:0.32.3
+    environment:
+      OLLAMA_HOST: 0.0.0.0:11434
+    healthcheck:
+      test: ["CMD", "ollama", "list"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 20s
+
+  tempo:
+    profiles: ["full"]
+    image: grafana/tempo:2.10.5
+    command: ["-config.file=/etc/tempo.yaml"]
+    volumes:
+      - ./observability/tempo.yaml:/etc/tempo.yaml:ro
+      - integration_tempo_data:/var/tempo
+    ports:
+      - "${INTEGRATION_TEMPO_PORT:-13200}:3200"
+    healthcheck:
+      test: ["CMD", "/tempo", "-version"]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+
+  otel-collector:
+    profiles: ["full"]
+    image: otel/opentelemetry-collector-contrib:0.157.0
+    command: ["--config=/etc/otelcol-contrib/config.yaml"]
+    volumes:
+      - ./observability/otel-collector-config.yaml:/etc/otelcol-contrib/config.yaml:ro
+    depends_on:
+      tempo:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "/otelcol-contrib", "validate", "--config=/etc/otelcol-contrib/config.yaml"]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+
+  prometheus:
+    profiles: ["full"]
+    image: prom/prometheus:v3.13.0
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+      - --storage.tsdb.path=/prometheus
+    volumes:
+      - ./observability/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - integration_prometheus_data:/prometheus
+    ports:
+      - "${INTEGRATION_PROMETHEUS_PORT:-19090}:9090"
+    depends_on:
+      otel-collector:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q --spider http://127.0.0.1:9090/-/ready"]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+
+  grafana:
+    profiles: ["full"]
+    image: grafana/grafana:13.1.0
+    environment:
+      GF_SECURITY_ADMIN_USER: ${INTEGRATION_GRAFANA_ADMIN_USER:?Set INTEGRATION_GRAFANA_ADMIN_USER for full profile}
+      GF_SECURITY_ADMIN_PASSWORD: ${INTEGRATION_GRAFANA_ADMIN_PASSWORD:?Set INTEGRATION_GRAFANA_ADMIN_PASSWORD for full profile}
+      GF_USERS_ALLOW_SIGN_UP: "false"
+      GF_AUTH_ANONYMOUS_ENABLED: "false"
+    ports:
+      - "${INTEGRATION_GRAFANA_PORT:-13000}:3000"
+    volumes:
+      - integration_grafana_data:/var/lib/grafana
+      - ./observability/grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./observability/grafana/dashboards:/var/lib/grafana/dashboards:ro
+    depends_on:
+      prometheus:
+        condition: service_healthy
+      tempo:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q --spider http://127.0.0.1:3000/api/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 20s
+
+volumes:
+  integration_postgres_data:
+  integration_kafka_data:
+  integration_tempo_data:
+  integration_prometheus_data:
+  integration_grafana_data:

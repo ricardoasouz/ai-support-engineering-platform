@@ -8,3 +8,11 @@
 __pycache__
 *.py[cod]
 tests
+.github
+integration_tests
+scripts
+security-reports
+*.md
+!knowledge_base/*.md
+requirements-dev.txt
+requirements-dev.lock

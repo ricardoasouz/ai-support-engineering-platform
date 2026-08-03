@@ -10,7 +10,9 @@ from fastapi import Request as FastAPIRequest
 
 from app.api.router import api_router
 from app.core.config import get_settings
+from app.core.http import RequestBodyLimitMiddleware, SecurityHeadersMiddleware
 from app.core.logging import configure_logging
+from app.db.session import dispose_engine
 from app.events.dependencies import get_outbox_retry_service
 from app.observability import (
     configure_observability,
@@ -18,6 +20,7 @@ from app.observability import (
     instrument_fastapi,
     shutdown_observability,
 )
+from app.version import __version__, get_build_metadata
 
 logger = logging.getLogger(__name__)
 
@@ -28,7 +31,15 @@ async def lifespan(_: FastAPI) -> AsyncIterator[None]:
     settings = get_settings()
     configure_logging(settings.log_level)
     configure_observability(settings)
-    logger.info("application_started")
+    build = get_build_metadata()
+    logger.info(
+        "application_started",
+        extra={
+            "version": build.version,
+            "git_sha": build.git_sha,
+            "build_time": build.build_time,
+        },
+    )
     retry_service = None
     if settings.kafka_enabled:
         retry_service = get_outbox_retry_service()
@@ -40,6 +51,7 @@ async def lifespan(_: FastAPI) -> AsyncIterator[None]:
             retry_service.stop()
         logger.info("application_stopped")
         shutdown_observability()
+        dispose_engine()
 
 
 app = FastAPI(
@@ -48,10 +60,15 @@ app = FastAPI(
         "Event-driven incident analysis with bounded, auditable support-agent "
         "resolutions."
     ),
-    version="0.5.0",
+    version=__version__,
     lifespan=lifespan,
 )
 app.include_router(api_router)
+app.add_middleware(
+    RequestBodyLimitMiddleware,
+    max_body_bytes=get_settings().api_max_request_body_bytes,
+)
+app.add_middleware(SecurityHeadersMiddleware)
 
 
 @app.middleware("http")

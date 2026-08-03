@@ -1,6 +1,16 @@
 x-app-environment: &app-environment
   DATABASE_URL: postgresql+psycopg://${POSTGRES_USER:?Set POSTGRES_USER in .env}:${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env}@db:5432/${POSTGRES_DB:?Set POSTGRES_DB in .env}
+  APP_ENVIRONMENT: ${APP_ENVIRONMENT:-development}
   LOG_LEVEL: ${LOG_LEVEL:-INFO}
+  API_MAX_REQUEST_BODY_BYTES: ${API_MAX_REQUEST_BODY_BYTES:-24576}
+  API_WORKERS: ${API_WORKERS:-2}
+  DATABASE_POOL_SIZE: ${DATABASE_POOL_SIZE:-10}
+  DATABASE_MAX_OVERFLOW: ${DATABASE_MAX_OVERFLOW:-10}
+  DATABASE_POOL_TIMEOUT_SECONDS: ${DATABASE_POOL_TIMEOUT_SECONDS:-30}
+  DATABASE_POOL_RECYCLE_SECONDS: ${DATABASE_POOL_RECYCLE_SECONDS:-1800}
+  DATABASE_CONNECT_TIMEOUT_SECONDS: ${DATABASE_CONNECT_TIMEOUT_SECONDS:-10}
+  GIT_SHA: ${GIT_SHA:-unknown}
+  BUILD_TIME: ${BUILD_TIME:-unknown}
   KAFKA_ENABLED: ${KAFKA_ENABLED:-true}
   KAFKA_BOOTSTRAP_SERVERS: ${KAFKA_BOOTSTRAP_SERVERS:-kafka:9092}
   KAFKA_INCIDENT_CREATED_TOPIC: ${KAFKA_INCIDENT_CREATED_TOPIC:-incident.created}
@@ -11,14 +21,18 @@ x-app-environment: &app-environment
   KAFKA_PRODUCER_ENABLE_IDEMPOTENCE: ${KAFKA_PRODUCER_ENABLE_IDEMPOTENCE:-true}
   KAFKA_PRODUCER_DELIVERY_TIMEOUT_MS: ${KAFKA_PRODUCER_DELIVERY_TIMEOUT_MS:-5000}
   KAFKA_PRODUCER_RETRIES: ${KAFKA_PRODUCER_RETRIES:-5}
+  KAFKA_PRODUCER_REQUEST_TIMEOUT_MS: ${KAFKA_PRODUCER_REQUEST_TIMEOUT_MS:-3000}
   KAFKA_OUTBOX_POLL_INTERVAL_SECONDS: ${KAFKA_OUTBOX_POLL_INTERVAL_SECONDS:-5}
   KAFKA_OUTBOX_BATCH_SIZE: ${KAFKA_OUTBOX_BATCH_SIZE:-20}
   KAFKA_WORKER_CLIENT_ID: ${KAFKA_WORKER_CLIENT_ID:-incident-worker}
   KAFKA_WORKER_POLL_TIMEOUT_SECONDS: ${KAFKA_WORKER_POLL_TIMEOUT_SECONDS:-1}
   KAFKA_WORKER_MAX_POLL_INTERVAL_MS: ${KAFKA_WORKER_MAX_POLL_INTERVAL_MS:-900000}
   KAFKA_WORKER_RETRY_BACKOFF_SECONDS: ${KAFKA_WORKER_RETRY_BACKOFF_SECONDS:-2}
+  KAFKA_CONSUMER_SESSION_TIMEOUT_MS: ${KAFKA_CONSUMER_SESSION_TIMEOUT_MS:-45000}
+  KAFKA_CONSUMER_HEARTBEAT_INTERVAL_MS: ${KAFKA_CONSUMER_HEARTBEAT_INTERVAL_MS:-3000}
   LLM_PROVIDER: ${LLM_PROVIDER:-ollama}
   EMBEDDING_PROVIDER: ${EMBEDDING_PROVIDER:-ollama}
+  ALLOW_FAKE_PROVIDERS: ${ALLOW_FAKE_PROVIDERS:-false}
   OLLAMA_BASE_URL: ${OLLAMA_BASE_URL:-http://ollama:11434}
   OLLAMA_LLM_MODEL: ${OLLAMA_LLM_MODEL:-qwen2.5:1.5b-instruct}
   OLLAMA_EMBEDDING_MODEL: ${OLLAMA_EMBEDDING_MODEL:-nomic-embed-text:v1.5}
@@ -134,20 +148,27 @@ services:
     restart: unless-stopped
 
   api:
+    image: ${API_IMAGE_REPOSITORY:-ai-support-platform-api}:${IMAGE_TAG:-dev}
     build:
       context: .
       dockerfile: Dockerfile
+      args:
+        APP_VERSION: ${APP_VERSION:-development}
+        GIT_SHA: ${GIT_SHA:-unknown}
+        BUILD_TIME: ${BUILD_TIME:-unknown}
     environment:
       <<: *app-environment
       OTEL_SERVICE_NAME: ai-support-api
-    command:
-      - sh
-      - -c
-      - >-
-        alembic upgrade head && exec uvicorn app.main:app --host 0.0.0.0
-        --port 8000 --workers ${API_WORKERS:-2} --no-access-log
+    command: ["-m", "app.runtime", "api"]
     ports:
-      - "8000:8000"
+      - "${API_PORT:-8000}:8000"
+    init: true
+    read_only: true
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,size=64m
+    cap_drop: ["ALL"]
+    security_opt:
+      - no-new-privileges:true
     depends_on:
       db:
         condition: service_healthy
@@ -164,20 +185,21 @@ services:
       retries: 5
       start_period: 15s
     restart: unless-stopped
+    stop_grace_period: 30s
 
   worker:
+    image: ${WORKER_IMAGE_REPOSITORY:-ai-support-platform-worker}:${IMAGE_TAG:-dev}
     build:
       context: .
       dockerfile: Dockerfile
+      args:
+        APP_VERSION: ${APP_VERSION:-development}
+        GIT_SHA: ${GIT_SHA:-unknown}
+        BUILD_TIME: ${BUILD_TIME:-unknown}
     environment:
       <<: *app-environment
       OTEL_SERVICE_NAME: ai-support-worker
-    command:
-      - sh
-      - -c
-      - >-
-        python -m app.knowledge.ingest &&
-        exec python -m app.workers.incident_worker
+    command: ["-m", "app.runtime", "worker"]
     depends_on:
       db:
         condition: service_healthy
@@ -187,8 +209,19 @@ services:
         condition: service_healthy
       ollama-init:
         condition: service_completed_successfully
+    init: true
+    read_only: true
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,size=64m
+    cap_drop: ["ALL"]
+    security_opt:
+      - no-new-privileges:true
     healthcheck:
-      test: ["CMD-SHELL", "test -f /tmp/incident-worker-ready"]
+      test:
+        - CMD
+        - /usr/local/bin/python
+        - -c
+        - from pathlib import Path; raise SystemExit(not Path('/tmp/incident-worker-ready').is_file())
       interval: 10s
       timeout: 3s
       retries: 5

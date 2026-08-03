@@ -134,3 +134,34 @@ def test_worker_consumer_configuration_requires_manual_offsets(
     assert captured["enable.auto.offset.store"] is False
     assert captured["auto.offset.reset"] == "earliest"
     assert captured["max.poll.interval.ms"] == 900_000
+    assert captured["session.timeout.ms"] == 45_000
+    assert captured["heartbeat.interval.ms"] == 3_000
+
+
+def test_worker_closes_consumer_when_stopped_before_readiness(
+    session_factory: sessionmaker[Session],
+) -> None:
+    class FakeConsumer:
+        closed = False
+
+        def close(self) -> None:
+            self.closed = True
+
+    class FakeTopicManager:
+        pass
+
+    consumer = FakeConsumer()
+    worker = KafkaIncidentWorker(
+        get_settings(),
+        IncidentMessageHandler(
+            IncidentEventProcessor(session_factory, "incident-processing-v1")
+        ),
+        consumer=consumer,
+        topic_manager=FakeTopicManager(),
+    )
+    stop = __import__("threading").Event()
+    stop.set()
+
+    worker.run(stop)
+
+    assert consumer.closed is True

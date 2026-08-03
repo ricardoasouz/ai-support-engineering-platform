@@ -108,3 +108,12 @@ def test_ollama_grammar_converts_literal_const_to_enum() -> None:
         "type": "string",
         "enum": ["tool"],
     }
+
+
+def test_ollama_provider_closes_injected_client() -> None:
+    client = httpx.Client(transport=httpx.MockTransport(lambda _: httpx.Response(200)))
+    provider = OllamaLLMProvider("http://unused", "test-model", 1, client)
+
+    provider.close()
+
+    assert client.is_closed
