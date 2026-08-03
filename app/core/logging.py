@@ -6,6 +6,8 @@ import logging.config
 from datetime import UTC, datetime
 from typing import Any
 
+from app.observability.context import active_trace_ids
+
 _STANDARD_LOG_RECORD_ATTRIBUTES = set(logging.makeLogRecord({}).__dict__) | {
     "asctime",
     "message",
@@ -30,6 +32,7 @@ class JsonFormatter(logging.Formatter):
                 and not key.startswith("_")
             }
         )
+        payload.update(active_trace_ids())
         if record.exc_info:
             payload["exception"] = self.formatException(record.exc_info)
         return json.dumps(payload, default=str)

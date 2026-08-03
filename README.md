@@ -1,15 +1,16 @@
 # AI Support Engineering Platform
 
-Phase 5 turns the asynchronous grounded resolver into a controlled support-
-engineering agent. Incident creation is still synchronous and durable. The agent
-runs only in the Kafka worker, can select only six typed read-only evidence tools,
-and must produce a schema-valid, citation-checked result for explicit human review.
+Phase 6 adds provider-neutral distributed tracing, low-cardinality operational
+metrics, and provisioned dashboards to the existing controlled support-engineering
+agent. Incident creation remains synchronous and durable. Telemetry is best-effort:
+an unavailable Collector, Prometheus, Tempo, or Grafana does not block PostgreSQL,
+Kafka, the worker, retrieval, local inference, or human review.
 
 The default stack remains local: PostgreSQL 17 with pgvector, Apache Kafka in KRaft
-mode, Ollama, `qwen2.5:1.5b-instruct`, and `nomic-embed-text:v1.5`. It needs no cloud
-AI API or external API key.
+mode, Ollama, OpenTelemetry Collector, Prometheus, Tempo, and Grafana. It needs no
+cloud AI API, external API key, or vendor-specific telemetry backend.
 
-## Phase 5 architecture
+## Phase 6 architecture
 
 ```text
 Client
@@ -50,6 +51,30 @@ Outbox dispatcher -- acknowledged publish --> Kafka incident.created
                                          commit Kafka offset
 ```
 
+The application and telemetry planes are deliberately separate:
+
+```text
+Application plane                         Telemetry plane
+
+Client                                    ai-support-api
+  |                                             +
+  v                                             |
+FastAPI --> PostgreSQL / outbox                 | OTLP/gRPC
+                  |                             v
+                  v                       OpenTelemetry Collector
+                Kafka                           |              |
+                  |                             | metrics      | traces
+                  v                             v              v
+Worker --> Agent / pgvector / Ollama       Prometheus        Tempo
+                                                        \      /
+                                                         Grafana
+```
+
+API and worker export through one path: OTLP to the Collector. The Collector exposes
+a Prometheus-compatible endpoint for Prometheus to scrape and sends traces to Tempo.
+The applications do not expose `/metrics`, which prevents double collection. Grafana
+queries provisioned Prometheus and Tempo data sources.
+
 Database mappings, API routes, analyzers, provider adapters, prompts, tools,
 orchestration, evaluation, and Kafka handling stay in separate modules. HTTP routes
 never run inference. Kafka or Ollama failure never rolls back a persisted incident.
@@ -65,6 +90,8 @@ app/ai/prompts/*/v1.txt      # allowlisted versioned prompt templates
 app/ai/prompt_registry.py    # safe image-bundled prompt loader
 app/evaluation/              # golden cases, metrics, fake runner, export CLI
 app/repositories/agent.py    # execution, steps, feedback, review persistence
+app/observability/           # tracing, metrics, instrumentation, context helpers
+observability/               # Collector, Prometheus, Tempo, Grafana provisioning
 migrations/versions/         # SQLAlchemy/Alembic schema history
 ```
 
@@ -79,6 +106,14 @@ The loop loads or resumes durable state, requests one structured decision, valid
 the decision locally, executes at most one approved tool, persists a sanitized step,
 and repeats. Before final output it requires both incident metadata and a runbook
 retrieval attempt. The resolver then returns:
+
+Planner prompt `v2` states the conditional tool/final field shapes explicitly.
+Locally, only unambiguous action aliases, server-mandated tool literals, and empty
+tool fields on final actions are normalized. Missing or unknown tool names are never
+mapped to executable tools. If structured planner validation still fails after the
+existing bounded repairs, the server may select a schema-valid `final` action only
+when both mandatory evidence tools have already succeeded; the resolver and citation
+guardrails still validate the resulting answer.
 
 ```json
 {
@@ -205,6 +240,11 @@ Earlier tables remain: `incidents`, `outbox_events`, `processed_events`,
 `knowledge_documents`, `knowledge_chunks`, `knowledge_embeddings`, and
 `ai_resolutions`. Existing PostgreSQL, Kafka, and Ollama named volumes are preserved.
 
+Phase 6 revision `20260803_0005` adds the nullable JSON `trace_context` column to
+`outbox_events`. It stores only the W3C `traceparent` and optional `tracestate` needed
+to connect a later dispatcher attempt to the original request. Existing events remain
+valid and no business payload or raw incident log is added.
+
 Migration commands:
 
 ```bash
@@ -300,7 +340,7 @@ Start and inspect the stack:
 docker compose config --quiet
 docker compose up -d --build
 docker compose ps
-docker compose logs -f api worker ollama kafka
+docker compose logs -f api worker ollama kafka otel-collector tempo prometheus grafana
 ```
 
 Services and jobs:
@@ -312,9 +352,17 @@ Services and jobs:
 - `api`: non-root FastAPI image, Alembic migrations on startup, host port 8000;
 - `ollama`: internal-only API, health check, persistent `ollama_models` volume;
 - `ollama-init`: one-shot pull of configured generation and embedding models;
-- `worker`: idempotent ingestion followed by the Kafka controlled-agent consumer.
+- `worker`: idempotent ingestion followed by the Kafka controlled-agent consumer;
+- `otel-collector`: internal OTLP receiver and trace/metric routing;
+- `tempo`: internal local trace store with a persistent `tempo_data` volume;
+- `prometheus`: internal seven-day metric store with a persistent
+  `prometheus_data` volume;
+- `grafana`: provisioned data sources and dashboards, persistent `grafana_data`, host
+  port `${GRAFANA_PORT:-3000}`.
 
-Only FastAPI is published to the host. PostgreSQL, Kafka, and Ollama remain internal.
+Only FastAPI (`http://127.0.0.1:8000`) and Grafana
+(`http://127.0.0.1:3000` by default) are published to the host. PostgreSQL, Kafka,
+Ollama, the OTLP receivers, Prometheus, and Tempo remain internal.
 Stop without deleting persistent volumes:
 
 ```bash
@@ -334,6 +382,13 @@ docker compose exec kafka /opt/kafka/bin/kafka-consumer-groups.sh \
   --bootstrap-server kafka:9092 --describe --group incident-processing-v1
 docker compose exec kafka /opt/kafka/bin/kafka-topics.sh \
   --bootstrap-server kafka:9092 --describe --topic incident.created
+docker compose logs --tail 200 otel-collector tempo prometheus grafana
+docker compose exec otel-collector /otelcol-contrib validate \
+  --config=/etc/otelcol-contrib/config.yaml
+docker compose exec prometheus promtool check config \
+  /etc/prometheus/prometheus.yml
+docker compose exec tempo /tempo -config.file=/etc/tempo.yaml \
+  -config.verify=true
 ```
 
 Exercise Ollama recovery without deleting data:
@@ -345,8 +400,22 @@ docker compose start ollama
 docker compose logs -f worker
 ```
 
-The first start may download the configured models. CPU inference is supported but
-can be slow, particularly on the first request.
+The one-shot model initializer skips models already held in `ollama_models`; the
+first start may otherwise download them. CPU inference is supported but can be slow,
+particularly on the first request.
+
+Exercise telemetry isolation without deleting data:
+
+```bash
+docker compose stop otel-collector
+# API, PostgreSQL, Kafka, worker, pgvector, Ollama, and review remain operational.
+docker compose start otel-collector
+docker compose logs --tail 100 otel-collector
+```
+
+The OTLP SDK uses short timeouts, bounded batching, and exception-safe export. Data
+generated while the Collector is unavailable is best-effort and may be dropped; new
+telemetry resumes after recovery. Application data remains durable in PostgreSQL.
 
 ## Configuration
 
@@ -359,16 +428,85 @@ Phase 5 settings are:
 - `AGENT_MODEL_RETRIES`, `AGENT_REPAIR_ATTEMPTS`;
 - `AGENT_PLANNER_PROMPT_VERSION`, `AGENT_RESOLVER_PROMPT_VERSION`.
 
+Phase 6 settings are:
+
+- `OTEL_SERVICE_NAME`: overridden by Compose to `ai-support-api` and
+  `ai-support-worker` for their respective processes;
+- `OTEL_EXPORTER_OTLP_ENDPOINT`: internal Collector gRPC endpoint;
+- `OTEL_TRACES_EXPORTER`, `OTEL_METRICS_EXPORTER`: `otlp` in Compose or `none` to
+  disable that signal;
+- `OTEL_RESOURCE_ATTRIBUTES`: comma-separated, bounded resource metadata;
+- `GRAFANA_ADMIN_USER`, `GRAFANA_ADMIN_PASSWORD`, `GRAFANA_PORT`: local Grafana
+  access; credentials are required from the ignored `.env` file.
+
 Credentials are not hardcoded. Local Kafka plaintext and a single broker are
 development choices, not a production security/availability design.
 
-## Observability metadata
+## Tracing, correlation, and privacy
 
-Structured logs and durable execution rows carry execution/event/incident IDs,
-provider/model, prompt name/version, status, retries, durations, step/tool/model
-counts, retrieval counts, nullable provider usage, and approximate input/output
-sizes. Tool and retrieval latency are recorded separately. No Prometheus, Grafana,
-OpenTelemetry, or external telemetry service is included in Phase 5.
+FastAPI request spans lead to deterministic analysis and the incident/outbox
+transaction. W3C trace context is saved with the outbox record, restored by the
+dispatcher, injected into Kafka headers, and extracted by the consumer. Worker child
+spans cover event validation, incident lookup, controlled-agent execution, tool
+validation and calls, embedding and pgvector retrieval, Ollama calls, citation/final
+validation, resolution and agent-step persistence, processed-event insertion, and
+offset commit. Human feedback and review transitions create their own request traces.
+
+`incident.id`, `event.id`, and `agent.execution_id` are trace and structured-log
+correlation attributes. JSON logs automatically add active `trace_id` and `span_id`
+without removing the existing identifiers. These IDs are never metric labels.
+
+Telemetry excludes request bodies, raw errors and incident logs, SQL text and bound
+parameters, retrieved chunk content, prompts, model responses, reviewer identity,
+secrets, and chain-of-thought. Provider/model and prompt name/version are bounded
+operational metadata. Usage counters are emitted only when Ollama actually reports
+them; the platform does not invent token counts.
+
+## Prometheus metrics and cardinality
+
+Metric families cover API requests and latency; incidents; outbox pending, publish,
+failure, retry, and duration; Kafka publish/consume/process/duplicate/malformed,
+failure, duration, and offset commit; agent execution, planner fallback, steps, tools,
+models, retries, retrieval, duration, and review; RAG retrieval/failure/duration/chunks/empty results
+and invalid citations; LLM requests/failures/duration/reported tokens; feedback and
+review outcomes; and database operation/failure/duration.
+
+Every metric passes through an enforced label allowlist:
+
+| Area | Permitted bounded labels |
+| --- | --- |
+| API | method, route template, status code |
+| Incidents | deterministic classification and severity |
+| Outbox/Kafka | configured topic, versioned event type, outcome, retryable |
+| Agent/tools | status, classification, fixed action type, allowlisted tool name |
+| Models | configured provider/model, fixed operation, allowlisted prompt name/version |
+| RAG | deterministic classification and outcome |
+| Database | fixed database system, SQL operation verb, outcome |
+| Review | bounded outcome only; reviewer is excluded |
+
+Potentially unbounded service names are excluded. `incident_id`, `event_id`,
+`execution_id`, partition/offset, arbitrary service/error/log text, prompts, and user
+input are rejected as labels. They belong only in safe traces/logs where applicable.
+
+## Grafana dashboards and Tempo
+
+Grafana provisions Prometheus and Tempo automatically plus four dashboards in the
+**AI Support Platform** folder:
+
+- **Platform Overview**: API rate/errors/latency, incidents, Kafka/worker outcomes,
+  agent status, and Ollama latency;
+- **Kafka and Outbox**: pending events, publishes, failures, retries, duplicates,
+  malformed messages, consumption, and processing duration;
+- **AI / RAG / Agent**: model latency/failures and operations, tool usage/failures,
+  agent duration/retries, retrieved chunks, empty retrieval, invalid citations, and
+  approval/rejection;
+- **Operational Health**: service signals, HTTP/worker/database health indicators,
+  Kafka and Ollama activity, and error rates.
+
+Use Grafana Explore with the Tempo data source to search by service or safe span
+attributes such as `incident.id`. Tempo-to-Prometheus links are provisioned. Loki is
+intentionally absent, so logs are correlated by copying `trace_id` from Tempo into
+`docker compose logs` rather than through a trace-to-log UI.
 
 ## Quality checks
 
@@ -384,6 +522,10 @@ python -m pip check
 pip-audit -r requirements.txt
 docker compose config --quiet
 docker compose build api worker
+docker compose exec otel-collector /otelcol-contrib validate \
+  --config=/etc/otelcol-contrib/config.yaml
+docker compose exec prometheus promtool check config \
+  /etc/prometheus/prometheus.yml
 ```
 
 ## Current roadmap
@@ -395,8 +537,12 @@ docker compose build api worker
   manual offsets, and idempotency.
 - Phase 4 — complete: pgvector knowledge base, Ollama provider abstractions,
   grounded structured resolutions, citations, and durable retry state.
-- Phase 5 — implemented: bounded support agent, typed evidence tools, versioned
+- Phase 5 — complete: bounded support agent, typed evidence tools, versioned
   planner/resolver prompts, audit ledger, guardrails, human review, feedback export,
   golden evaluation, and execution metadata.
-- Later phases: Kubernetes, cloud deployment, CI/CD, frontend, and broader
-  observability. They are intentionally excluded here.
+- Phase 6 — implemented: OpenTelemetry trace propagation, low-cardinality OTLP
+  metrics, Collector, Prometheus, Tempo, provisioned Grafana dashboards, and
+  trace/log correlation.
+- Later phases: Kubernetes, Helm, Terraform, cloud deployment, CI/CD, frontend,
+  autonomous remediation, external LLMs, fine-tuning, and service mesh. They are
+  intentionally excluded here.

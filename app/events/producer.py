@@ -4,8 +4,13 @@ import logging
 from collections.abc import Callable
 from typing import Any, Protocol
 
+from opentelemetry.trace import SpanKind
+
 from app.core.config import Settings
 from app.events.models import IncidentCreatedEvent
+from app.observability.context import inject_kafka_headers
+from app.observability.metrics import get_metrics
+from app.observability.tracing import mark_span_error, start_span
 
 
 class EventPublishError(RuntimeError):
@@ -109,6 +114,32 @@ class KafkaEventProducer:
 
     def publish(self, event: IncidentCreatedEvent, topic: str) -> None:
         """Publish and wait for broker acknowledgement before returning."""
+        attributes = {
+            "messaging.system": "kafka",
+            "messaging.destination.name": topic,
+            "messaging.operation.type": "publish",
+            "event.id": str(event.event_id),
+            "event.type": event.event_type,
+            "incident.id": event.incident_id,
+        }
+        metric_attributes = {"topic": topic, "event_type": event.event_type}
+        with start_span(
+            f"kafka publish {topic}",
+            kind=SpanKind.PRODUCER,
+            attributes=attributes,
+        ) as span:
+            try:
+                self._publish(event, topic)
+            except EventPublishError as exc:
+                mark_span_error(span, exc)
+                get_metrics().count(
+                    "kafka_publish_failures", attributes=metric_attributes
+                )
+                raise
+        get_metrics().count("kafka_events_published", attributes=metric_attributes)
+
+    def _publish(self, event: IncidentCreatedEvent, topic: str) -> None:
+        """Perform one acknowledged send beneath the producer trace span."""
         self._topic_manager.ensure_topic(topic)
         delivery_errors: list[str] = []
 
@@ -121,6 +152,7 @@ class KafkaEventProducer:
                 topic=topic,
                 key=str(event.incident_id).encode("utf-8"),
                 value=event.serialize(),
+                headers=inject_kafka_headers(),
                 on_delivery=on_delivery,
             )
             remaining = self._producer.flush(

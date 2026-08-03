@@ -11,6 +11,8 @@ from sqlalchemy.pool import StaticPool
 
 environ.setdefault("DATABASE_URL", "sqlite+pysqlite:///:memory:")
 environ.setdefault("KAFKA_ENABLED", "false")
+environ.setdefault("OTEL_TRACES_EXPORTER", "none")
+environ.setdefault("OTEL_METRICS_EXPORTER", "none")
 
 from app.db.base import Base
 from app.db.session import get_db

@@ -11,6 +11,7 @@ from app.core.config import get_settings
 from app.core.logging import configure_logging
 from app.db.session import get_session_factory
 from app.knowledge.retrieval import KnowledgeRetriever
+from app.observability import configure_observability, shutdown_observability
 from app.workers.processor import IncidentEventProcessor
 from app.workers.runner import IncidentMessageHandler, KafkaIncidentWorker
 
@@ -22,6 +23,7 @@ def main() -> None:
     """Configure the worker, handle shutdown signals, and consume events."""
     settings = get_settings()
     configure_logging(settings.log_level)
+    configure_observability(settings)
     stop = Event()
 
     def request_shutdown(signum: int, _frame: object) -> None:
@@ -72,6 +74,7 @@ def main() -> None:
         worker.run(stop, on_ready=mark_ready)
     finally:
         WORKER_READY_FILE.unlink(missing_ok=True)
+        shutdown_observability()
 
 
 if __name__ == "__main__":

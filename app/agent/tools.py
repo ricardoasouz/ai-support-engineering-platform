@@ -5,6 +5,7 @@ import re
 import time
 from concurrent.futures import ThreadPoolExecutor
 from concurrent.futures import TimeoutError as FutureTimeoutError
+from contextvars import copy_context
 from dataclasses import dataclass, field
 from typing import ClassVar, Protocol
 
@@ -25,6 +26,8 @@ from app.agent.sanitization import sanitize_text, sanitize_value
 from app.ai.providers.base import ProviderUnavailableError
 from app.db.models import AgentExecutionRecord, AIResolutionRecord, IncidentRecord
 from app.knowledge.retrieval import KnowledgeRetriever
+from app.observability.metrics import get_metrics
+from app.observability.tracing import mark_span_error, start_span
 
 MAX_TOOL_ARGUMENT_BYTES = 8_000
 MAX_TOOL_RESULT_BYTES = 24_000
@@ -455,6 +458,46 @@ class ToolExecutor:
         *,
         current_tool_calls: int,
     ) -> ToolResult:
+        """Trace and meter one validated, allowlisted tool invocation."""
+        started = time.perf_counter()
+        status = "failure"
+        attributes = {"agent.tool_name": request.tool_name}
+        with start_span("agent tool execution", attributes=attributes) as span:
+            try:
+                result = self._execute_impl(
+                    request,
+                    context,
+                    current_tool_calls=current_tool_calls,
+                )
+                status = "success"
+                return result
+            except Exception as exc:
+                mark_span_error(span, exc)
+                get_metrics().count(
+                    "agent_tool_failures",
+                    attributes={"tool_name": request.tool_name},
+                )
+                raise
+            finally:
+                metric_attributes = {
+                    "tool_name": request.tool_name,
+                    "status": status,
+                }
+                get_metrics().count("agent_tool_calls", attributes=metric_attributes)
+                get_metrics().observe(
+                    "agent_tool_duration_seconds",
+                    time.perf_counter() - started,
+                    metric_attributes,
+                )
+
+    def _execute_impl(
+        self,
+        request: ToolRequest,
+        context: ToolContext,
+        *,
+        current_tool_calls: int,
+    ) -> ToolResult:
+        """Apply local authorization, validation, budgets, and execution."""
         if current_tool_calls >= self.max_tool_calls:
             raise AgentBudgetExceededError("Maximum tool-call budget reached")
         encoded_arguments = json.dumps(
@@ -462,35 +505,46 @@ class ToolExecutor:
         )
         if len(encoded_arguments.encode("utf-8")) > MAX_TOOL_ARGUMENT_BYTES:
             raise ToolExecutionError("Tool arguments exceed the size limit")
-        tool = self.registry.get(request.tool_name)
-        try:
-            arguments = tool.input_model.model_validate(request.arguments)
-        except ValidationError as exc:
-            raise ToolExecutionError(
-                f"Invalid arguments for {tool.name}: {exc}"
-            ) from exc
-        requested_incident_id = getattr(arguments, "incident_id", context.incident_id)
-        if requested_incident_id != context.incident_id:
-            raise UnauthorizedToolArgumentsError(
-                "Tool incident_id does not match the active execution"
+        with start_span(
+            "agent tool validation",
+            attributes={"agent.tool_name": request.tool_name},
+        ):
+            tool = self.registry.get(request.tool_name)
+            try:
+                arguments = tool.input_model.model_validate(request.arguments)
+            except ValidationError as exc:
+                raise ToolExecutionError(
+                    f"Invalid arguments for {tool.name}: {exc}"
+                ) from exc
+            requested_incident_id = getattr(
+                arguments, "incident_id", context.incident_id
             )
+            if requested_incident_id != context.incident_id:
+                raise UnauthorizedToolArgumentsError(
+                    "Tool incident_id does not match the active execution"
+                )
 
         started = time.perf_counter()
         pool = ThreadPoolExecutor(max_workers=1, thread_name_prefix="agent-tool")
-        future = pool.submit(tool.execute, arguments, context)
-        try:
-            output = future.result(timeout=self.timeout_seconds)
-        except FutureTimeoutError as exc:
-            future.cancel()
-            raise ToolTimeoutError(f"Tool timed out: {tool.name}") from exc
-        except ToolExecutionError:
-            raise
-        except (ProviderUnavailableError, SQLAlchemyError):
-            raise
-        except Exception as exc:
-            raise ToolExecutionError(f"Tool failed safely: {tool.name}") from exc
-        finally:
-            pool.shutdown(wait=False, cancel_futures=True)
+        with start_span(
+            "agent tool call",
+            attributes={"agent.tool_name": request.tool_name},
+        ):
+            runtime_context = copy_context()
+            future = pool.submit(runtime_context.run, tool.execute, arguments, context)
+            try:
+                output = future.result(timeout=self.timeout_seconds)
+            except FutureTimeoutError as exc:
+                future.cancel()
+                raise ToolTimeoutError(f"Tool timed out: {tool.name}") from exc
+            except ToolExecutionError:
+                raise
+            except (ProviderUnavailableError, SQLAlchemyError):
+                raise
+            except Exception as exc:
+                raise ToolExecutionError(f"Tool failed safely: {tool.name}") from exc
+            finally:
+                pool.shutdown(wait=False, cancel_futures=True)
         duration_ms = (time.perf_counter() - started) * 1_000
         encoded_result = output.model_dump_json()
         if len(encoded_result.encode("utf-8")) > MAX_TOOL_RESULT_BYTES:

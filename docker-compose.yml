@@ -37,8 +37,12 @@ x-app-environment: &app-environment
   AGENT_TOOL_TIMEOUT_SECONDS: ${AGENT_TOOL_TIMEOUT_SECONDS:-180}
   AGENT_MODEL_RETRIES: ${AGENT_MODEL_RETRIES:-3}
   AGENT_REPAIR_ATTEMPTS: ${AGENT_REPAIR_ATTEMPTS:-2}
-  AGENT_PLANNER_PROMPT_VERSION: ${AGENT_PLANNER_PROMPT_VERSION:-v1}
+  AGENT_PLANNER_PROMPT_VERSION: ${AGENT_PLANNER_PROMPT_VERSION:-v2}
   AGENT_RESOLVER_PROMPT_VERSION: ${AGENT_RESOLVER_PROMPT_VERSION:-v1}
+  OTEL_EXPORTER_OTLP_ENDPOINT: ${OTEL_EXPORTER_OTLP_ENDPOINT:-http://otel-collector:4317}
+  OTEL_TRACES_EXPORTER: ${OTEL_TRACES_EXPORTER:-otlp}
+  OTEL_METRICS_EXPORTER: ${OTEL_METRICS_EXPORTER:-otlp}
+  OTEL_RESOURCE_ATTRIBUTES: ${OTEL_RESOURCE_ATTRIBUTES:-deployment.environment.name=development,service.namespace=ai-support-platform}
 
 services:
   db:
@@ -77,8 +81,10 @@ services:
     entrypoint: ["/bin/sh", "-c"]
     command:
       - >-
-        ollama pull "$${OLLAMA_LLM_MODEL}" &&
-        ollama pull "$${OLLAMA_EMBEDDING_MODEL}"
+        (ollama show "$${OLLAMA_LLM_MODEL}" >/dev/null 2>&1 ||
+        ollama pull "$${OLLAMA_LLM_MODEL}") &&
+        (ollama show "$${OLLAMA_EMBEDDING_MODEL}" >/dev/null 2>&1 ||
+        ollama pull "$${OLLAMA_EMBEDDING_MODEL}")
     environment:
       OLLAMA_HOST: http://ollama:11434
       OLLAMA_LLM_MODEL: ${OLLAMA_LLM_MODEL:-qwen2.5:1.5b-instruct}
@@ -131,7 +137,9 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
-    environment: *app-environment
+    environment:
+      <<: *app-environment
+      OTEL_SERVICE_NAME: ai-support-api
     command:
       - sh
       - -c
@@ -161,7 +169,9 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
-    environment: *app-environment
+    environment:
+      <<: *app-environment
+      OTEL_SERVICE_NAME: ai-support-worker
     command:
       - sh
       - -c
@@ -186,7 +196,94 @@ services:
     stop_grace_period: 30s
     restart: unless-stopped
 
+  tempo:
+    image: grafana/tempo:2.10.5
+    command: ["-config.file=/etc/tempo.yaml"]
+    volumes:
+      - ./observability/tempo.yaml:/etc/tempo.yaml:ro
+      - tempo_data:/var/tempo
+    healthcheck:
+      test: ["CMD", "/tempo", "-version"]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+      start_period: 10s
+    restart: unless-stopped
+
+  otel-collector:
+    image: otel/opentelemetry-collector-contrib:0.157.0
+    command: ["--config=/etc/otelcol-contrib/config.yaml"]
+    volumes:
+      - ./observability/otel-collector-config.yaml:/etc/otelcol-contrib/config.yaml:ro
+    depends_on:
+      tempo:
+        condition: service_healthy
+    healthcheck:
+      test:
+        - CMD
+        - /otelcol-contrib
+        - validate
+        - --config=/etc/otelcol-contrib/config.yaml
+      interval: 10s
+      timeout: 5s
+      retries: 6
+      start_period: 10s
+    restart: unless-stopped
+
+  prometheus:
+    image: prom/prometheus:v3.13.0
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+      - --storage.tsdb.path=/prometheus
+      - --storage.tsdb.retention.time=7d
+    volumes:
+      - ./observability/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus_data:/prometheus
+    depends_on:
+      otel-collector:
+        condition: service_healthy
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - wget -q --spider http://127.0.0.1:9090/-/ready
+      interval: 10s
+      timeout: 5s
+      retries: 6
+      start_period: 10s
+    restart: unless-stopped
+
+  grafana:
+    image: grafana/grafana:13.1.0
+    environment:
+      GF_SECURITY_ADMIN_USER: ${GRAFANA_ADMIN_USER:?Set GRAFANA_ADMIN_USER in .env}
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD:?Set GRAFANA_ADMIN_PASSWORD in .env}
+      GF_USERS_ALLOW_SIGN_UP: "false"
+      GF_AUTH_ANONYMOUS_ENABLED: "false"
+    ports:
+      - "${GRAFANA_PORT:-3000}:3000"
+    volumes:
+      - grafana_data:/var/lib/grafana
+      - ./observability/grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./observability/grafana/dashboards:/var/lib/grafana/dashboards:ro
+    depends_on:
+      prometheus:
+        condition: service_healthy
+      tempo:
+        condition: service_healthy
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - wget -q --spider http://127.0.0.1:3000/api/health
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 20s
+    restart: unless-stopped
+
 volumes:
   postgres_data:
   kafka_data:
   ollama_models:
+  tempo_data:
+  prometheus_data:
+  grafana_data:

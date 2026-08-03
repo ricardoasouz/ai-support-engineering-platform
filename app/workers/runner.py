@@ -1,16 +1,21 @@
 """Kafka consumer loop with manual offsets and safe poison-message handling."""
 
 import logging
+import time
 from collections.abc import Callable
 from enum import Enum
 from threading import Event
 from typing import Any
 
+from opentelemetry.trace import SpanKind
 from pydantic import ValidationError
 
 from app.core.config import Settings
 from app.events.models import IncidentCreatedEvent
 from app.events.producer import EventPublishError, KafkaTopicManager
+from app.observability.context import extract_kafka_context, set_current_span_attributes
+from app.observability.metrics import get_metrics
+from app.observability.tracing import mark_span_error, start_span
 from app.workers.processor import (
     IncidentEventProcessor,
     ProcessingOutcome,
@@ -39,21 +44,39 @@ class IncidentMessageHandler:
     def handle(self, value: bytes | None) -> MessageOutcome:
         """Classify malformed, retryable, duplicate, and successful messages."""
         if value is None:
+            get_metrics().count("kafka_malformed")
             logger.warning("incident_event_malformed", extra={"error": "empty value"})
             return MessageOutcome.MALFORMED
 
-        try:
-            event = IncidentCreatedEvent.deserialize(value)
-        except (ValidationError, ValueError, UnicodeDecodeError) as exc:
-            logger.warning(
-                "incident_event_malformed",
-                extra={"error": str(exc)},
-            )
-            return MessageOutcome.MALFORMED
+        with start_span("incident event validation") as validation_span:
+            try:
+                event = IncidentCreatedEvent.deserialize(value)
+            except (ValidationError, ValueError, UnicodeDecodeError) as exc:
+                mark_span_error(validation_span, exc)
+                get_metrics().count("kafka_malformed")
+                logger.warning(
+                    "incident_event_malformed",
+                    extra={"error": str(exc)},
+                )
+                return MessageOutcome.MALFORMED
+
+        set_current_span_attributes(
+            {
+                "event.id": str(event.event_id),
+                "event.type": event.event_type,
+                "incident.id": event.incident_id,
+                "incident.classification": event.classification.value,
+                "incident.severity": event.severity.value,
+            }
+        )
 
         try:
             outcome = self.processor.process(event)
         except RetryableProcessingError as exc:
+            get_metrics().count(
+                "kafka_processing_failures",
+                attributes={"event_type": event.event_type, "retryable": True},
+            )
             logger.warning(
                 "incident_event_processing_deferred",
                 extra={
@@ -65,8 +88,15 @@ class IncidentMessageHandler:
             return MessageOutcome.RETRY
 
         if outcome is ProcessingOutcome.DUPLICATE:
+            get_metrics().count(
+                "kafka_duplicates", attributes={"event_type": event.event_type}
+            )
             return MessageOutcome.DUPLICATE
         if outcome is ProcessingOutcome.FAILED:
+            get_metrics().count(
+                "kafka_processing_failures",
+                attributes={"event_type": event.event_type, "retryable": False},
+            )
             return MessageOutcome.FAILED
         return MessageOutcome.PROCESSED
 
@@ -148,37 +178,84 @@ class KafkaIncidentWorker:
                     self._handle_consumer_error(message.error(), stop)
                     continue
 
-                try:
-                    outcome = self.handler.handle(message.value())
-                except Exception:
-                    logger.exception("incident_event_processing_failed")
-                    self._seek_to_message(message)
-                    stop.wait(self.settings.kafka_worker_retry_backoff_seconds)
-                    continue
-
-                if outcome is MessageOutcome.RETRY:
-                    self._seek_to_message(message)
-                    stop.wait(self.settings.kafka_worker_retry_backoff_seconds)
-                    continue
-
-                try:
-                    self.consumer.commit(message=message, asynchronous=False)
-                    logger.info(
-                        "incident_event_offset_committed",
-                        extra={
-                            "topic": message.topic(),
-                            "partition": message.partition(),
-                            "offset": message.offset(),
-                            "outcome": outcome.value,
-                        },
+                headers_method = getattr(message, "headers", None)
+                headers = headers_method() if callable(headers_method) else None
+                parent = extract_kafka_context(headers)
+                topic = message.topic()
+                event_type = "incident.created"
+                started = time.perf_counter()
+                with start_span(
+                    f"kafka process {topic}",
+                    kind=SpanKind.CONSUMER,
+                    context=parent,
+                    attributes={
+                        "messaging.system": "kafka",
+                        "messaging.destination.name": topic,
+                        "messaging.operation.type": "process",
+                    },
+                ) as processing_span:
+                    get_metrics().count(
+                        "kafka_events_consumed",
+                        attributes={"topic": topic, "event_type": event_type},
                     )
-                except KafkaException as exc:
-                    logger.warning(
-                        "incident_event_offset_commit_failed",
-                        extra={"error": str(exc)},
+                    try:
+                        outcome = self.handler.handle(message.value())
+                    except Exception as exc:
+                        mark_span_error(processing_span, exc)
+                        get_metrics().count(
+                            "kafka_processing_failures",
+                            attributes={"event_type": event_type, "retryable": True},
+                        )
+                        logger.exception("incident_event_processing_failed")
+                        self._seek_to_message(message)
+                        stop.wait(self.settings.kafka_worker_retry_backoff_seconds)
+                        continue
+
+                    get_metrics().observe(
+                        "kafka_processing_duration_seconds",
+                        time.perf_counter() - started,
+                        {"event_type": event_type, "outcome": outcome.value},
                     )
-                    self._seek_to_message(message)
-                    stop.wait(self.settings.kafka_worker_retry_backoff_seconds)
+                    if outcome is MessageOutcome.RETRY:
+                        self._seek_to_message(message)
+                        stop.wait(self.settings.kafka_worker_retry_backoff_seconds)
+                        continue
+
+                    try:
+                        with start_span("kafka offset commit"):
+                            self.consumer.commit(message=message, asynchronous=False)
+                        get_metrics().count(
+                            "kafka_offset_commit",
+                            attributes={"topic": topic, "outcome": "success"},
+                        )
+                        get_metrics().count(
+                            "kafka_events_processed",
+                            attributes={
+                                "event_type": event_type,
+                                "outcome": outcome.value,
+                            },
+                        )
+                        logger.info(
+                            "incident_event_offset_committed",
+                            extra={
+                                "topic": topic,
+                                "partition": message.partition(),
+                                "offset": message.offset(),
+                                "outcome": outcome.value,
+                            },
+                        )
+                    except KafkaException as exc:
+                        mark_span_error(processing_span, exc)
+                        get_metrics().count(
+                            "kafka_offset_commit",
+                            attributes={"topic": topic, "outcome": "failure"},
+                        )
+                        logger.warning(
+                            "incident_event_offset_commit_failed",
+                            extra={"error": str(exc)},
+                        )
+                        self._seek_to_message(message)
+                        stop.wait(self.settings.kafka_worker_retry_backoff_seconds)
         finally:
             self.consumer.close()
             logger.info("incident_worker_stopped")

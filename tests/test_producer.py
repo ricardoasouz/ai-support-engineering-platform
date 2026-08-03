@@ -51,6 +51,7 @@ def test_producer_serializes_key_and_value_and_waits_for_ack() -> None:
     assert topics.topics == ["incident.created"]
     assert fake.messages[0]["key"] == b"42"
     assert IncidentCreatedEvent.deserialize(fake.messages[0]["value"]) == event
+    assert "headers" in fake.messages[0]
 
 
 @pytest.mark.parametrize(

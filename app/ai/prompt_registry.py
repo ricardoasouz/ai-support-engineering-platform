@@ -41,6 +41,7 @@ class PromptRegistry:
 
     _ALLOWED: ClassVar[dict[tuple[str, str], str]] = {
         ("planner", "v1"): "planner/v1.txt",
+        ("planner", "v2"): "planner/v2.txt",
         ("resolver", "v1"): "resolver/v1.txt",
         ("evidence_summary", "v1"): "evidence_summary/v1.txt",
     }

@@ -10,6 +10,8 @@ from sqlalchemy.orm import Session, sessionmaker
 from app.ai.workflow import ResolutionWorkflowOutcome, RetryableResolutionError
 from app.db.models import IncidentRecord, ProcessedEventRecord
 from app.events.models import IncidentCreatedEvent
+from app.observability.context import set_current_span_attributes
+from app.observability.tracing import start_span
 
 logger = logging.getLogger(__name__)
 
@@ -50,7 +52,18 @@ class IncidentEventProcessor:
     def process(self, event: IncidentCreatedEvent) -> ProcessingOutcome:
         """Run the configured workflow before writing its idempotency marker."""
         event_id = str(event.event_id)
-        with self.session_factory() as session:
+        set_current_span_attributes(
+            {
+                "event.id": event_id,
+                "incident.id": event.incident_id,
+                "incident.classification": event.classification.value,
+                "incident.severity": event.severity.value,
+            }
+        )
+        with (
+            start_span("worker incident and idempotency lookup"),
+            self.session_factory() as session,
+        ):
             if session.get(ProcessedEventRecord, event_id) is not None:
                 logger.info(
                     "incident_event_duplicate",
@@ -77,7 +90,8 @@ class IncidentEventProcessor:
             outcome = ProcessingOutcome.PROCESSED
         else:
             try:
-                resolution_outcome = self.workflow.resolve(event)
+                with start_span("worker agent execution"):
+                    resolution_outcome = self.workflow.resolve(event)
             except RetryableResolutionError as exc:
                 raise RetryableProcessingError(str(exc)) from exc
             processing_result = {
@@ -91,7 +105,10 @@ class IncidentEventProcessor:
                 else ProcessingOutcome.FAILED
             )
 
-        with self.session_factory() as session:
+        with (
+            start_span("worker processed event insertion"),
+            self.session_factory() as session,
+        ):
             if session.get(ProcessedEventRecord, event_id) is not None:
                 return ProcessingOutcome.DUPLICATE
             session.add(

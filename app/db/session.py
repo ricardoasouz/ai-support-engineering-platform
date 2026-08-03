@@ -7,12 +7,15 @@ from sqlalchemy import Engine, create_engine
 from sqlalchemy.orm import Session, sessionmaker
 
 from app.core.config import get_settings
+from app.observability.instrumentation import instrument_sqlalchemy_engine
 
 
 @lru_cache
 def get_engine() -> Engine:
     """Create the process-wide SQLAlchemy engine lazily."""
-    return create_engine(get_settings().database_url, pool_pre_ping=True)
+    engine = create_engine(get_settings().database_url, pool_pre_ping=True)
+    instrument_sqlalchemy_engine(engine)
+    return engine
 
 
 @lru_cache

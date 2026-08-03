@@ -1,6 +1,7 @@
 """Semantic pgvector retrieval for incident-resolution grounding."""
 
 import math
+import time
 from collections.abc import Sequence
 
 from sqlalchemy import select
@@ -14,6 +15,8 @@ from app.db.models import (
     KnowledgeEmbeddingRecord,
 )
 from app.knowledge.models import RetrievedChunk
+from app.observability.metrics import get_metrics
+from app.observability.tracing import mark_span_error, start_span
 
 
 def build_incident_query(incident: IncidentRecord) -> str:
@@ -66,12 +69,91 @@ class KnowledgeRetriever:
         category: str | None = None,
     ) -> list[RetrievedChunk]:
         """Embed a bounded query and retrieve optional category-filtered chunks."""
-        query = self.embedding_provider.embed_texts([query_text])[0]
         result_limit = min(top_k or self.top_k, self.top_k)
-        with self.session_factory() as session:
-            if session.bind is not None and session.bind.dialect.name == "postgresql":
-                return self._retrieve_postgresql(session, query, result_limit, category)
-            return self._retrieve_portable(session, query, result_limit, category)
+        classification_label = (
+            category
+            if category in {"authentication", "database", "http"}
+            else "all"
+            if category is None
+            else "other"
+        )
+        attributes = {
+            "retrieval.top_k": result_limit,
+            "retrieval.classification": classification_label,
+        }
+        started = time.perf_counter()
+        outcome = "failure"
+        with start_span("rag retrieval", attributes=attributes) as retrieval_span:
+            try:
+                with start_span(
+                    "rag embedding query",
+                    attributes={
+                        "gen_ai.provider.name": self.embedding_provider.provider_name,
+                        "gen_ai.request.model": self.embedding_provider.model_name,
+                    },
+                ):
+                    query = self.embedding_provider.embed_texts([query_text])[0]
+                with (
+                    start_span(
+                        "rag pgvector query",
+                        attributes={"retrieval.top_k": result_limit},
+                    ),
+                    self.session_factory() as session,
+                ):
+                    if (
+                        session.bind is not None
+                        and session.bind.dialect.name == "postgresql"
+                    ):
+                        results = self._retrieve_postgresql(
+                            session, query, result_limit, category
+                        )
+                    else:
+                        results = self._retrieve_portable(
+                            session, query, result_limit, category
+                        )
+                outcome = "success"
+                retrieval_span.set_attribute("retrieval.result_count", len(results))
+                get_metrics().count(
+                    "rag_retrieval",
+                    attributes={
+                        "classification": classification_label,
+                        "outcome": outcome,
+                    },
+                )
+                get_metrics().observe(
+                    "rag_chunks_returned",
+                    len(results),
+                    {"classification": classification_label},
+                )
+                if not results:
+                    get_metrics().count(
+                        "rag_empty_retrieval",
+                        attributes={"classification": classification_label},
+                    )
+                return results
+            except Exception as exc:
+                mark_span_error(retrieval_span, exc)
+                get_metrics().count(
+                    "rag_retrieval",
+                    attributes={
+                        "classification": classification_label,
+                        "outcome": "failure",
+                    },
+                )
+                get_metrics().count(
+                    "rag_retrieval_failures",
+                    attributes={"classification": classification_label},
+                )
+                raise
+            finally:
+                get_metrics().observe(
+                    "rag_retrieval_duration_seconds",
+                    time.perf_counter() - started,
+                    {
+                        "classification": classification_label,
+                        "outcome": outcome,
+                    },
+                )
 
     def _retrieve_postgresql(
         self,

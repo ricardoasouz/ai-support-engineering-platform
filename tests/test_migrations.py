@@ -63,6 +63,7 @@ def test_initial_migration_creates_incident_schema(tmp_path: Path) -> None:
             "event_type",
             "topic",
             "payload",
+            "trace_context",
             "attempts",
             "next_attempt_at",
             "last_error",
@@ -83,7 +84,7 @@ def test_initial_migration_creates_incident_schema(tmp_path: Path) -> None:
         with engine.connect() as connection:
             assert connection.scalar(
                 text("SELECT version_num FROM alembic_version")
-            ) == ("20260803_0004")
+            ) == ("20260803_0005")
         engine.dispose()
     finally:
         environ["DATABASE_URL"] = previous_database_url

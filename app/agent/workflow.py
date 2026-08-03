@@ -9,7 +9,7 @@ from datetime import UTC, datetime
 from typing import Literal, TypeVar
 from uuid import uuid4
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 from sqlalchemy import select
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session, sessionmaker
@@ -27,6 +27,7 @@ from app.agent.models import (
     PlannerDecision,
     ToolRequest,
     ToolResult,
+    normalize_planner_payload,
 )
 from app.agent.sanitization import safe_error, sanitize_value
 from app.agent.tools import (
@@ -42,6 +43,7 @@ from app.ai.providers.base import (
     LLMProvider,
     ProviderResponseError,
     ProviderUnavailableError,
+    StructuredOutputValidationError,
 )
 from app.ai.workflow import (
     ResolutionWorkflowOutcome,
@@ -55,9 +57,28 @@ from app.db.models import (
 )
 from app.events.models import IncidentCreatedEvent
 from app.knowledge.retrieval import KnowledgeRetriever
+from app.observability.context import set_current_span_attributes
+from app.observability.metrics import get_metrics
+from app.observability.tracing import mark_span_error, start_span
 
 logger = logging.getLogger(__name__)
 StructuredModel = TypeVar("StructuredModel", bound=BaseModel)
+
+
+def _normalize_required_tool_payload(value: object, tool_name: str) -> object:
+    """Fill only literals already mandated by the server-owned execution state."""
+    normalized = normalize_planner_payload(value)
+    if not isinstance(normalized, dict):
+        return normalized
+    payload = dict(normalized)
+    if payload.get("next_action") is None:
+        payload["next_action"] = "tool"
+    if payload.get("next_action") == "tool" and payload.get("tool_name") in {
+        None,
+        "",
+    }:
+        payload["tool_name"] = tool_name
+    return normalize_planner_payload(payload)
 
 
 class RequiredIncidentDecision(BaseModel):
@@ -72,6 +93,11 @@ class RequiredIncidentDecision(BaseModel):
     reason_summary: str = Field(min_length=1, max_length=500)
     expected_evidence: str = Field(min_length=1, max_length=500)
 
+    @model_validator(mode="before")
+    @classmethod
+    def normalize_required_literals(cls, value: object) -> object:
+        return _normalize_required_tool_payload(value, "get_incident")
+
 
 class RequiredRetrievalDecision(BaseModel):
     """Planner shape while server policy requires one runbook search."""
@@ -84,6 +110,11 @@ class RequiredRetrievalDecision(BaseModel):
     tool_arguments: RetrieveRunbooksInput
     reason_summary: str = Field(min_length=1, max_length=500)
     expected_evidence: str = Field(min_length=1, max_length=500)
+
+    @model_validator(mode="before")
+    @classmethod
+    def normalize_required_literals(cls, value: object) -> object:
+        return _normalize_required_tool_payload(value, "retrieve_runbooks")
 
 
 @dataclass(frozen=True)
@@ -121,7 +152,7 @@ class ControlledAgentWorkflow:
         llm_provider: LLMProvider,
         limits: AgentLimits,
         *,
-        planner_prompt_version: str = "v1",
+        planner_prompt_version: str = "v2",
         resolver_prompt_version: str = "v1",
         prompt_registry: PromptRegistry | None = None,
         tool_registry: ToolRegistry | None = None,
@@ -151,8 +182,36 @@ class ControlledAgentWorkflow:
             )
 
     def resolve(self, event: IncidentCreatedEvent) -> ResolutionWorkflowOutcome:
+        """Create the bounded execution span around a durable/resumable run."""
+        with start_span(
+            "agent execution",
+            attributes={
+                "event.id": str(event.event_id),
+                "incident.id": event.incident_id,
+                "incident.classification": event.classification.value,
+                "incident.severity": event.severity.value,
+                "agent.provider": self.llm_provider.provider_name,
+                "agent.model": self.llm_provider.model_name,
+            },
+        ) as execution_span:
+            try:
+                return self._resolve(event)
+            except Exception as exc:
+                mark_span_error(execution_span, exc)
+                raise
+
+    def _resolve(self, event: IncidentCreatedEvent) -> ResolutionWorkflowOutcome:
         """Run or resume an execution and persist final output before Kafka commit."""
         _incident, execution_id, terminal = self._claim(event)
+        set_current_span_attributes(
+            {
+                "agent.execution_id": execution_id,
+                "event.id": str(event.event_id),
+                "incident.id": event.incident_id,
+                "incident.classification": event.classification.value,
+                "incident.severity": event.severity.value,
+            }
+        )
         if terminal is not None:
             return terminal
         started = time.perf_counter()
@@ -198,10 +257,19 @@ class ControlledAgentWorkflow:
                     repair_count += 1
                     last_error = safe_error(exc)
                     if repair_count > self.limits.repair_attempts:
-                        raise AgentValidationError(
-                            "Planner output remained invalid after repair attempts"
-                        ) from exc
-                    continue
+                        if required_tools or not isinstance(
+                            exc, StructuredOutputValidationError
+                        ):
+                            raise AgentValidationError(
+                                "Planner output remained invalid after repair attempts"
+                            ) from exc
+                        decision = self._grounded_final_fallback(
+                            execution_id,
+                            event,
+                            repair_count=repair_count,
+                        )
+                    else:
+                        continue
 
                 if decision.next_action == "tool":
                     request = ToolRequest(
@@ -325,20 +393,62 @@ class ControlledAgentWorkflow:
                         "citation_count": len(final.cited_sources),
                     },
                 )
+                self._record_execution_metrics(
+                    status=AgentStatus.AWAITING_REVIEW.value,
+                    classification=event.classification.value,
+                    started=started,
+                )
                 return ResolutionWorkflowOutcome.COMPLETED
         except (ProviderUnavailableError, ToolTimeoutError, SQLAlchemyError) as exc:
             self._record_failure(execution_id, exc, retryable=True)
+            self._record_execution_metrics(
+                status=AgentStatus.RETRYABLE.value,
+                classification=event.classification.value,
+                started=started,
+                failure=True,
+                retry=True,
+            )
             raise RetryableResolutionError(safe_error(exc)) from exc
         except (AgentValidationError, ToolExecutionError) as exc:
             terminal_failure = self._record_failure(execution_id, exc, retryable=False)
+            status = (
+                AgentStatus.FAILED.value
+                if terminal_failure
+                else AgentStatus.RETRYABLE.value
+            )
+            self._record_execution_metrics(
+                status=status,
+                classification=event.classification.value,
+                started=started,
+                failure=True,
+                retry=not terminal_failure,
+            )
             if terminal_failure:
                 return ResolutionWorkflowOutcome.FAILED
             raise RetryableResolutionError(safe_error(exc)) from exc
         except AgentBudgetExceededError as exc:
             self._record_terminal_failure(execution_id, exc)
+            self._record_execution_metrics(
+                status=AgentStatus.FAILED.value,
+                classification=event.classification.value,
+                started=started,
+                failure=True,
+            )
             return ResolutionWorkflowOutcome.FAILED
 
     def _claim(
+        self, event: IncidentCreatedEvent
+    ) -> tuple[IncidentRecord, str, ResolutionWorkflowOutcome | None]:
+        with start_span(
+            "agent execution load or resume",
+            attributes={
+                "event.id": str(event.event_id),
+                "incident.id": event.incident_id,
+            },
+        ):
+            return self._claim_impl(event)
+
+    def _claim_impl(
         self, event: IncidentCreatedEvent
     ) -> tuple[IncidentRecord, str, ResolutionWorkflowOutcome | None]:
         now = datetime.now(UTC)
@@ -514,6 +624,55 @@ class ControlledAgentWorkflow:
         payload = raw.model_dump(mode="json")
         return PlannerDecision.model_validate(payload)
 
+    @staticmethod
+    def _grounded_final_fallback(
+        execution_id: str,
+        event: IncidentCreatedEvent,
+        *,
+        repair_count: int,
+    ) -> PlannerDecision:
+        """Finish safely after bounded schema repairs and mandatory evidence.
+
+        The caller invokes this only when both required evidence tools succeeded.
+        It never infers or executes a missing/unknown tool name.
+        """
+        attributes = {
+            "agent.execution_id": execution_id,
+            "incident.id": event.incident_id,
+            "incident.classification": event.classification.value,
+            "agent.repair_count": repair_count,
+        }
+        with start_span("agent planner deterministic fallback", attributes=attributes):
+            decision = PlannerDecision.model_validate(
+                {
+                    "goal": "Produce a grounded resolution from validated evidence.",
+                    "next_action": "final",
+                    "tool_name": None,
+                    "tool_arguments": None,
+                    "reason_summary": (
+                        "Required incident and runbook evidence is available."
+                    ),
+                    "expected_evidence": (
+                        "A cited resolution using only the validated evidence."
+                    ),
+                }
+            )
+        get_metrics().count(
+            "agent_planner_fallbacks",
+            attributes={"classification": event.classification.value},
+        )
+        logger.warning(
+            "controlled_agent_planner_fallback",
+            extra={
+                "execution_id": execution_id,
+                "event_id": str(event.event_id),
+                "incident_id": event.incident_id,
+                "classification": event.classification.value,
+                "repair_count": repair_count,
+            },
+        )
+        return decision
+
     def _generate_final(
         self,
         execution_id: str,
@@ -521,37 +680,38 @@ class ControlledAgentWorkflow:
         steps: list[AgentStepRecord],
         results: dict[int, ToolResult],
     ) -> AgentFinalResponse:
-        evidence = [
-            {
-                "step": number,
-                "tool": result.tool_name,
-                "summary": result.summary,
-                "data": result.data,
-                "evidence_references": [
-                    reference.model_dump(mode="json")
-                    for reference in result.evidence_references
-                ],
-            }
-            for number, result in results.items()
-        ]
-        references = self._evidence_references(results)
-        citations = [
-            {
-                "source_id": reference.source_id,
-                "chunk_id": reference.chunk_id,
-            }
-            for reference in references
-            if reference.evidence_type == "runbook"
-            and reference.source_id
-            and reference.chunk_id
-        ]
-        actual_tools = list(
-            dict.fromkeys(
-                step.tool_name
-                for step in steps
-                if step.tool_name and step.outcome == "succeeded"
+        with start_span("rag context construction"):
+            evidence = [
+                {
+                    "step": number,
+                    "tool": result.tool_name,
+                    "summary": result.summary,
+                    "data": result.data,
+                    "evidence_references": [
+                        reference.model_dump(mode="json")
+                        for reference in result.evidence_references
+                    ],
+                }
+                for number, result in results.items()
+            ]
+            references = self._evidence_references(results)
+            citations = [
+                {
+                    "source_id": reference.source_id,
+                    "chunk_id": reference.chunk_id,
+                }
+                for reference in references
+                if reference.evidence_type == "runbook"
+                and reference.source_id
+                and reference.chunk_id
+            ]
+            actual_tools = list(
+                dict.fromkeys(
+                    step.tool_name
+                    for step in steps
+                    if step.tool_name and step.outcome == "succeeded"
+                )
             )
-        )
         prompt = self.resolver_prompt.render(
             {
                 "incident_event": event.model_dump_json(),
@@ -564,7 +724,8 @@ class ControlledAgentWorkflow:
         for _ in range(self.limits.repair_attempts + 1):
             try:
                 final, _ = self._model_call(execution_id, prompt, AgentFinalResponse)
-                return self._validate_final(final, actual_tools, references)
+                with start_span("agent final validation"):
+                    return self._validate_final(final, actual_tools, references)
             except (ProviderResponseError, AgentValidationError) as exc:
                 last_error = exc
                 logger.warning(
@@ -607,13 +768,16 @@ class ControlledAgentWorkflow:
             (citation.source_id, citation.chunk_id) for citation in final.cited_sources
         ]
         if len(supplied) != len(set(supplied)):
+            get_metrics().count("rag_invalid_citation")
             raise AgentValidationError("Final citations contain duplicates")
         invalid = [citation for citation in supplied if citation not in allowed]
         if invalid:
+            get_metrics().count("rag_invalid_citation", len(invalid))
             raise AgentValidationError(
                 f"Final citations are not in evidence: {invalid}"
             )
         if allowed and not supplied:
+            get_metrics().count("rag_invalid_citation")
             raise AgentValidationError(
                 "Final output omitted available runbook citations"
             )
@@ -651,29 +815,107 @@ class ControlledAgentWorkflow:
     ) -> tuple[StructuredModel, float]:
         started = time.perf_counter()
         output_chars = 0
-        try:
-            response = self.llm_provider.generate_structured(prompt, response_model)
-            output_chars = len(response.model_dump_json())
-            return response, (time.perf_counter() - started) * 1_000
-        finally:
-            duration_ms = (time.perf_counter() - started) * 1_000
-            usage = sanitize_value(getattr(self.llm_provider, "last_usage", None))
-            with self.session_factory() as session:
-                execution = session.scalar(
-                    select(AgentExecutionRecord).where(
-                        AgentExecutionRecord.execution_id == execution_id
-                    )
+        operation = "resolver" if response_model is AgentFinalResponse else "planner"
+        prompt_definition = (
+            self.resolver_prompt if operation == "resolver" else self.planner_prompt
+        )
+        metric_attributes = {
+            "provider": self.llm_provider.provider_name,
+            "model": self.llm_provider.model_name,
+            "operation": operation,
+            "prompt_name": prompt_definition.name,
+            "prompt_version": prompt_definition.version,
+        }
+        with start_span(
+            f"agent {operation} model call",
+            attributes={
+                "agent.execution_id": execution_id,
+                "agent.provider": self.llm_provider.provider_name,
+                "agent.model": self.llm_provider.model_name,
+                "agent.prompt_name": prompt_definition.name,
+                "agent.prompt_version": prompt_definition.version,
+            },
+        ) as model_span:
+            try:
+                response = self.llm_provider.generate_structured(prompt, response_model)
+                output_chars = len(response.model_dump_json())
+                return response, (time.perf_counter() - started) * 1_000
+            except Exception as exc:
+                mark_span_error(model_span, exc)
+                get_metrics().count(
+                    "agent_model_failures",
+                    attributes={
+                        "provider": self.llm_provider.provider_name,
+                        "model": self.llm_provider.model_name,
+                        "operation": operation,
+                    },
                 )
-                if execution is not None:
-                    execution.model_call_count += 1
-                    execution.provider_duration_ms += duration_ms
-                    execution.approximate_input_chars += len(prompt)
-                    execution.approximate_output_chars += output_chars
-                    execution.provider_usage = usage
-                    execution.updated_at = datetime.now(UTC)
-                    session.commit()
+                raise
+            finally:
+                duration_ms = (time.perf_counter() - started) * 1_000
+                get_metrics().count("agent_model_calls", attributes=metric_attributes)
+                get_metrics().observe(
+                    "agent_model_duration_seconds",
+                    duration_ms / 1_000,
+                    {
+                        "provider": self.llm_provider.provider_name,
+                        "model": self.llm_provider.model_name,
+                        "operation": operation,
+                    },
+                )
+                usage = sanitize_value(getattr(self.llm_provider, "last_usage", None))
+                with (
+                    start_span("agent model metadata persistence"),
+                    self.session_factory() as session,
+                ):
+                    execution = session.scalar(
+                        select(AgentExecutionRecord).where(
+                            AgentExecutionRecord.execution_id == execution_id
+                        )
+                    )
+                    if execution is not None:
+                        execution.model_call_count += 1
+                        execution.provider_duration_ms += duration_ms
+                        execution.approximate_input_chars += len(prompt)
+                        execution.approximate_output_chars += output_chars
+                        execution.provider_usage = usage
+                        execution.updated_at = datetime.now(UTC)
+                        session.commit()
 
     def _persist_tool_step(
+        self,
+        execution_id: str,
+        step_number: int,
+        decision: PlannerDecision,
+        request: ToolRequest,
+        result: ToolResult,
+    ) -> AgentStepRecord:
+        with start_span(
+            "agent step persistence",
+            attributes={
+                "agent.execution_id": execution_id,
+                "agent.step_number": step_number,
+                "agent.tool_name": request.tool_name,
+            },
+        ):
+            record = self._persist_tool_step_impl(
+                execution_id, step_number, decision, request, result
+            )
+        get_metrics().count(
+            "agent_steps",
+            attributes={"action_type": "tool", "outcome": "succeeded"},
+        )
+        with start_span("agent evidence accumulation"):
+            retrieved = {
+                reference.reference_id
+                for reference in result.evidence_references
+                if reference.evidence_type == "runbook"
+            }
+            if retrieved:
+                get_metrics().count("agent_retrieved_chunks", len(retrieved))
+        return record
+
+    def _persist_tool_step_impl(
         self,
         execution_id: str,
         step_number: int,
@@ -763,9 +1005,38 @@ class ControlledAgentWorkflow:
             session.commit()
             session.refresh(record)
             session.expunge(record)
+            get_metrics().count(
+                "agent_steps",
+                attributes={"action_type": decision.next_action, "outcome": outcome},
+            )
             return record
 
     def _persist_final(
+        self,
+        execution_id: str,
+        event: IncidentCreatedEvent,
+        decision: PlannerDecision,
+        final: AgentFinalResponse,
+        steps: list[AgentStepRecord],
+        results: dict[int, ToolResult],
+    ) -> None:
+        with start_span(
+            "agent resolution persistence",
+            attributes={
+                "agent.execution_id": execution_id,
+                "event.id": str(event.event_id),
+                "incident.id": event.incident_id,
+            },
+        ):
+            self._persist_final_impl(
+                execution_id, event, decision, final, steps, results
+            )
+        get_metrics().count(
+            "agent_steps",
+            attributes={"action_type": "final", "outcome": "completed"},
+        )
+
+    def _persist_final_impl(
         self,
         execution_id: str,
         event: IncidentCreatedEvent,
@@ -837,6 +1108,30 @@ class ControlledAgentWorkflow:
             execution.error_message_safe = None
             execution.updated_at = now
             session.commit()
+
+    @staticmethod
+    def _record_execution_metrics(
+        *,
+        status: str,
+        classification: str,
+        started: float,
+        failure: bool = False,
+        retry: bool = False,
+    ) -> None:
+        attributes = {"status": status, "classification": classification}
+        get_metrics().count("agent_executions", attributes=attributes)
+        get_metrics().observe(
+            "agent_execution_duration_seconds",
+            time.perf_counter() - started,
+            attributes,
+        )
+        if failure:
+            get_metrics().count("agent_execution_failures", attributes=attributes)
+        if retry:
+            get_metrics().count(
+                "agent_execution_retries",
+                attributes={"classification": classification},
+            )
 
     def _record_failure(
         self, execution_id: str, error: Exception, *, retryable: bool

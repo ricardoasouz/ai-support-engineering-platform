@@ -1,0 +1,14 @@
+apiVersion: 1
+
+providers:
+  - name: AI Support Platform
+    orgId: 1
+    folder: AI Support Platform
+    folderUid: ai-support-platform
+    type: file
+    disableDeletion: false
+    allowUiUpdates: false
+    updateIntervalSeconds: 30
+    options:
+      path: /var/lib/grafana/dashboards
+      foldersFromFilesStructure: false

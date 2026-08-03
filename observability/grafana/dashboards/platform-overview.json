@@ -1,0 +1,24 @@
+{
+  "annotations": {"list": []},
+  "editable": false,
+  "graphTooltip": 1,
+  "panels": [
+    {"id": 1, "title": "API request rate", "type": "timeseries", "gridPos": {"h": 8, "w": 8, "x": 0, "y": 0}, "datasource": {"type": "prometheus", "uid": "prometheus"}, "targets": [{"expr": "sum(rate(api_requests_total[5m]))", "legendFormat": "requests/s", "refId": "A"}], "fieldConfig": {"defaults": {"unit": "reqps"}, "overrides": []}, "options": {"legend": {"displayMode": "list", "placement": "bottom"}}},
+    {"id": 2, "title": "API error rate", "type": "timeseries", "gridPos": {"h": 8, "w": 8, "x": 8, "y": 0}, "datasource": {"type": "prometheus", "uid": "prometheus"}, "targets": [{"expr": "sum(rate(api_requests_total{status_code=~\"5..\"}[5m]))", "legendFormat": "5xx/s", "refId": "A"}], "fieldConfig": {"defaults": {"unit": "reqps"}, "overrides": []}, "options": {"legend": {"displayMode": "list", "placement": "bottom"}}},
+    {"id": 3, "title": "API p95 latency", "type": "timeseries", "gridPos": {"h": 8, "w": 8, "x": 16, "y": 0}, "datasource": {"type": "prometheus", "uid": "prometheus"}, "targets": [{"expr": "histogram_quantile(0.95, sum by (le) (rate(api_request_duration_seconds_bucket[5m])))", "legendFormat": "p95", "refId": "A"}], "fieldConfig": {"defaults": {"unit": "s"}, "overrides": []}, "options": {"legend": {"displayMode": "list", "placement": "bottom"}}},
+    {"id": 4, "title": "Incidents created", "type": "timeseries", "gridPos": {"h": 8, "w": 8, "x": 0, "y": 8}, "datasource": {"type": "prometheus", "uid": "prometheus"}, "targets": [{"expr": "sum by (classification) (rate(incidents_created_total[5m]))", "legendFormat": "{{classification}}", "refId": "A"}], "fieldConfig": {"defaults": {}, "overrides": []}, "options": {"legend": {"displayMode": "table", "placement": "bottom"}}},
+    {"id": 5, "title": "Kafka publish / consume", "type": "timeseries", "gridPos": {"h": 8, "w": 8, "x": 8, "y": 8}, "datasource": {"type": "prometheus", "uid": "prometheus"}, "targets": [{"expr": "sum(rate(kafka_events_published_total[5m]))", "legendFormat": "published", "refId": "A"}, {"expr": "sum(rate(kafka_events_consumed_total[5m]))", "legendFormat": "consumed", "refId": "B"}], "fieldConfig": {"defaults": {}, "overrides": []}, "options": {"legend": {"displayMode": "list", "placement": "bottom"}}},
+    {"id": 6, "title": "Worker outcomes", "type": "timeseries", "gridPos": {"h": 8, "w": 8, "x": 16, "y": 8}, "datasource": {"type": "prometheus", "uid": "prometheus"}, "targets": [{"expr": "sum by (outcome) (rate(kafka_events_processed_total[5m]))", "legendFormat": "{{outcome}}", "refId": "A"}, {"expr": "sum by (retryable) (rate(kafka_processing_failures_total[5m]))", "legendFormat": "failure retryable={{retryable}}", "refId": "B"}], "fieldConfig": {"defaults": {}, "overrides": []}, "options": {"legend": {"displayMode": "table", "placement": "bottom"}}},
+    {"id": 7, "title": "Agent completion / retry / failure", "type": "timeseries", "gridPos": {"h": 8, "w": 12, "x": 0, "y": 16}, "datasource": {"type": "prometheus", "uid": "prometheus"}, "targets": [{"expr": "sum by (status) (rate(agent_executions_total[5m]))", "legendFormat": "{{status}}", "refId": "A"}, {"expr": "sum(rate(agent_execution_retries_total[5m]))", "legendFormat": "retries", "refId": "B"}], "fieldConfig": {"defaults": {}, "overrides": []}, "options": {"legend": {"displayMode": "table", "placement": "bottom"}}},
+    {"id": 8, "title": "Ollama p95 latency", "type": "timeseries", "gridPos": {"h": 8, "w": 12, "x": 12, "y": 16}, "datasource": {"type": "prometheus", "uid": "prometheus"}, "targets": [{"expr": "histogram_quantile(0.95, sum by (le, operation) (rate(llm_request_duration_seconds_bucket{provider=\"ollama\"}[5m])))", "legendFormat": "{{operation}}", "refId": "A"}], "fieldConfig": {"defaults": {"unit": "s"}, "overrides": []}, "options": {"legend": {"displayMode": "list", "placement": "bottom"}}}
+  ],
+  "refresh": "10s",
+  "schemaVersion": 41,
+  "tags": ["phase6", "platform"],
+  "templating": {"list": []},
+  "time": {"from": "now-1h", "to": "now"},
+  "timezone": "browser",
+  "title": "Platform Overview",
+  "uid": "ai-support-overview",
+  "version": 1
+}

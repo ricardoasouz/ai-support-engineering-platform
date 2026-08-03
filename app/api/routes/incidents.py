@@ -30,6 +30,8 @@ from app.models.incident import (
     IncidentResponse,
     Severity,
 )
+from app.observability.metrics import get_metrics
+from app.observability.tracing import mark_span_error, start_span
 from app.repositories.agent import AgentRepository
 from app.repositories.incidents import IncidentRepository
 from app.repositories.resolutions import ResolutionRepository
@@ -236,6 +238,37 @@ def list_agent_steps(
 
 
 def _record_feedback(
+    incident_id: int,
+    feedback: FeedbackRequest,
+    session: Session,
+    *,
+    outcome: str,
+) -> FeedbackResponse:
+    with start_span(
+        "human review transition",
+        attributes={"incident.id": incident_id, "review.outcome": outcome},
+    ) as review_span:
+        try:
+            response = _record_feedback_impl(
+                incident_id, feedback, session, outcome=outcome
+            )
+        except HTTPException as exc:
+            if exc.status_code == status.HTTP_409_CONFLICT:
+                get_metrics().count("review_conflicts", attributes={"outcome": outcome})
+            mark_span_error(review_span, exc)
+            raise
+        review_span.set_attribute("resolution.id", response.resolution_id)
+        get_metrics().count("review_feedback", attributes={"outcome": outcome})
+        if outcome == "approved":
+            get_metrics().count("review_approved")
+            get_metrics().count("agent_review_approved")
+        elif outcome == "rejected":
+            get_metrics().count("review_rejected")
+            get_metrics().count("agent_review_rejected")
+        return response
+
+
+def _record_feedback_impl(
     incident_id: int,
     feedback: FeedbackRequest,
     session: Session,

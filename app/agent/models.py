@@ -9,6 +9,50 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from app.ai.models import SourceCitation
 
+_PLANNER_ACTION_ALIASES = {
+    "tool": "tool",
+    "tool_call": "tool",
+    "call_tool": "tool",
+    "final": "final",
+    "final_answer": "final",
+    "finish": "final",
+}
+
+
+def normalize_planner_payload(value: object) -> object:
+    """Normalize only planner fields whose structured meaning is unambiguous.
+
+    This deliberately does not guess or rewrite tool names. Ambiguous missing tools,
+    unknown actions, conflicting aliases, and non-empty tool fields on final actions
+    remain validation failures.
+    """
+    if not isinstance(value, dict):
+        return value
+    payload = dict(value)
+    raw_action = payload.get("next_action")
+    if isinstance(raw_action, str):
+        action_key = raw_action.strip().lower().replace("-", "_").replace(" ", "_")
+        normalized_action = _PLANNER_ACTION_ALIASES.get(action_key)
+        if normalized_action is not None:
+            payload["next_action"] = normalized_action
+    elif raw_action is None:
+        explicit_tool = payload.get("tool_name", payload.get("tool"))
+        if isinstance(explicit_tool, str) and explicit_tool:
+            payload["next_action"] = "tool"
+
+    action = payload.get("next_action")
+    if action == "tool":
+        if "tool_name" not in payload and "tool" in payload:
+            payload["tool_name"] = payload.pop("tool")
+        if "tool_arguments" not in payload and "arguments" in payload:
+            payload["tool_arguments"] = payload.pop("arguments")
+    elif action == "final":
+        if payload.get("tool_name") == "":
+            payload["tool_name"] = None
+        if payload.get("tool_arguments") == {}:
+            payload["tool_arguments"] = None
+    return payload
+
 
 class AgentStatus(str, Enum):
     """Supported durable execution and human-review states."""
@@ -80,6 +124,12 @@ class PlannerDecision(BaseModel):
     tool_arguments: dict[str, object] | None = None
     reason_summary: str = Field(min_length=1, max_length=500)
     expected_evidence: str = Field(min_length=1, max_length=500)
+
+    @model_validator(mode="before")
+    @classmethod
+    def normalize_unambiguous_fields(cls, value: object) -> object:
+        """Accept conservative structured aliases without weakening validation."""
+        return normalize_planner_payload(value)
 
     @model_validator(mode="after")
     def validate_action_shape(self) -> "PlannerDecision":

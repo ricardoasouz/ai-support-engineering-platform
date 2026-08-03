@@ -22,6 +22,28 @@ class Settings(BaseSettings):
         default="INFO",
         validation_alias="LOG_LEVEL",
     )
+    otel_service_name: str = Field(
+        default="ai-support-api",
+        validation_alias="OTEL_SERVICE_NAME",
+        min_length=1,
+    )
+    otel_exporter_otlp_endpoint: str = Field(
+        default="http://localhost:4317",
+        validation_alias="OTEL_EXPORTER_OTLP_ENDPOINT",
+        min_length=1,
+    )
+    otel_traces_exporter: Literal["otlp", "none"] = Field(
+        default="none",
+        validation_alias="OTEL_TRACES_EXPORTER",
+    )
+    otel_metrics_exporter: Literal["otlp", "none"] = Field(
+        default="none",
+        validation_alias="OTEL_METRICS_EXPORTER",
+    )
+    otel_resource_attributes: str = Field(
+        default="deployment.environment.name=development",
+        validation_alias="OTEL_RESOURCE_ATTRIBUTES",
+    )
     kafka_enabled: bool = Field(default=True, validation_alias="KAFKA_ENABLED")
     kafka_bootstrap_servers: str = Field(
         default="localhost:9092",
@@ -204,8 +226,8 @@ class Settings(BaseSettings):
         ge=0,
         le=5,
     )
-    agent_planner_prompt_version: Literal["v1"] = Field(
-        default="v1", validation_alias="AGENT_PLANNER_PROMPT_VERSION"
+    agent_planner_prompt_version: Literal["v1", "v2"] = Field(
+        default="v2", validation_alias="AGENT_PLANNER_PROMPT_VERSION"
     )
     agent_resolver_prompt_version: Literal["v1"] = Field(
         default="v1", validation_alias="AGENT_RESOLVER_PROMPT_VERSION"

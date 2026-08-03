@@ -1,9 +1,11 @@
 """First-class self-hosted Ollama LLM and embedding adapters."""
 
 import math
+import time
 from typing import Any
 
 import httpx
+from opentelemetry.trace import SpanKind
 from pydantic import ValidationError
 
 from app.ai.providers.base import (
@@ -11,7 +13,10 @@ from app.ai.providers.base import (
     ProviderResponseError,
     ProviderUnavailableError,
     StructuredModel,
+    StructuredOutputValidationError,
 )
+from app.observability.metrics import get_metrics
+from app.observability.tracing import mark_span_error, start_span
 
 _OLLAMA_GRAMMAR_KEYS = {"type", "properties", "required", "items", "enum"}
 
@@ -137,6 +142,59 @@ class OllamaLLMProvider:
         prompt: str,
         response_model: type[StructuredModel],
     ) -> StructuredModel:
+        """Generate structured output with safe provider telemetry."""
+        started = time.perf_counter()
+        status = "failure"
+        self._last_usage = None
+        metric_attributes = {
+            "provider": self.provider_name,
+            "model": self.model_name,
+            "operation": "chat",
+        }
+        with start_span(
+            "ollama chat",
+            kind=SpanKind.CLIENT,
+            attributes={
+                "gen_ai.provider.name": self.provider_name,
+                "gen_ai.request.model": self.model_name,
+                "gen_ai.operation.name": "chat",
+            },
+        ) as span:
+            try:
+                response = self._generate_structured(prompt, response_model)
+                status = "success"
+                return response
+            except Exception as exc:
+                mark_span_error(span, exc)
+                get_metrics().count("llm_failures", attributes=metric_attributes)
+                raise
+            finally:
+                request_attributes = {**metric_attributes, "status": status}
+                get_metrics().count("llm_requests", attributes=request_attributes)
+                get_metrics().observe(
+                    "llm_request_duration_seconds",
+                    time.perf_counter() - started,
+                    request_attributes,
+                )
+                if status == "success" and self._last_usage is not None:
+                    prompt_tokens = self._last_usage.get("prompt_eval_count")
+                    completion_tokens = self._last_usage.get("eval_count")
+                    if isinstance(prompt_tokens, int) and prompt_tokens >= 0:
+                        get_metrics().count(
+                            "llm_prompt_tokens", prompt_tokens, metric_attributes
+                        )
+                    if isinstance(completion_tokens, int) and completion_tokens >= 0:
+                        get_metrics().count(
+                            "llm_completion_tokens",
+                            completion_tokens,
+                            metric_attributes,
+                        )
+
+    def _generate_structured(
+        self,
+        prompt: str,
+        response_model: type[StructuredModel],
+    ) -> StructuredModel:
         schema = response_model.model_json_schema()
         grammar_schema = _ollama_grammar_schema(schema)
         body = self._http.post(
@@ -177,7 +235,7 @@ class OllamaLLMProvider:
         try:
             return response_model.model_validate_json(content)
         except ValidationError as exc:
-            raise ProviderResponseError(
+            raise StructuredOutputValidationError(
                 f"Ollama structured output failed validation: {exc}"
             ) from exc
 
@@ -212,6 +270,42 @@ class OllamaEmbeddingProvider:
     def embed_texts(self, texts: list[str]) -> list[list[float]]:
         if not texts:
             return []
+        started = time.perf_counter()
+        status = "failure"
+        metric_attributes = {
+            "provider": self.provider_name,
+            "model": self.model_name,
+            "operation": "embedding",
+        }
+        with start_span(
+            "ollama embedding",
+            kind=SpanKind.CLIENT,
+            attributes={
+                "gen_ai.provider.name": self.provider_name,
+                "gen_ai.request.model": self.model_name,
+                "gen_ai.operation.name": "embedding",
+                "gen_ai.request.input_count": len(texts),
+            },
+        ) as span:
+            try:
+                result = self._embed_texts(texts)
+                status = "success"
+                return result
+            except Exception as exc:
+                mark_span_error(span, exc)
+                get_metrics().count("llm_failures", attributes=metric_attributes)
+                raise
+            finally:
+                request_attributes = {**metric_attributes, "status": status}
+                get_metrics().count("llm_requests", attributes=request_attributes)
+                get_metrics().observe(
+                    "llm_request_duration_seconds",
+                    time.perf_counter() - started,
+                    request_attributes,
+                )
+
+    def _embed_texts(self, texts: list[str]) -> list[list[float]]:
+        """Call the batch embedding API and validate every returned vector."""
         body = self._http.post(
             "/api/embed",
             {"model": self._model, "input": texts, "truncate": True},

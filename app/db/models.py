@@ -89,6 +89,7 @@ class OutboxEventRecord(Base):
     event_type: Mapped[str] = mapped_column(String(100), nullable=False)
     topic: Mapped[str] = mapped_column(String(255), nullable=False)
     payload: Mapped[dict[str, object]] = mapped_column(JSON, nullable=False)
+    trace_context: Mapped[dict[str, str] | None] = mapped_column(JSON, nullable=True)
     attempts: Mapped[int] = mapped_column(
         Integer,
         nullable=False,

@@ -7,6 +7,7 @@ from sqlalchemy.orm import Session
 
 from app.db.models import OutboxEventRecord
 from app.events.models import IncidentCreatedEvent
+from app.observability.context import capture_trace_context
 
 
 class OutboxRepository:
@@ -23,6 +24,7 @@ class OutboxRepository:
             event_type=event.event_type,
             topic=topic,
             payload=event.model_dump(mode="json"),
+            trace_context=capture_trace_context() or None,
         )
         self.session.add(record)
         self.session.flush()

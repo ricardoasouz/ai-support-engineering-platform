@@ -4,13 +4,22 @@ from collections import deque
 from typing import Any, ClassVar
 
 import pytest
-from pydantic import BaseModel
+from pydantic import BaseModel, ValidationError
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session, sessionmaker
 
 from app.agent.models import AgentFinalResponse, PlannerDecision
-from app.agent.workflow import AgentLimits, ControlledAgentWorkflow
-from app.ai.providers.base import ProviderCapabilities, ProviderUnavailableError
+from app.agent.workflow import (
+    AgentLimits,
+    ControlledAgentWorkflow,
+    RequiredIncidentDecision,
+    RequiredRetrievalDecision,
+)
+from app.ai.providers.base import (
+    ProviderCapabilities,
+    ProviderUnavailableError,
+    StructuredOutputValidationError,
+)
 from app.db.models import (
     AgentExecutionRecord,
     AgentStepRecord,
@@ -37,8 +46,11 @@ class FakeEmbeddingProvider:
 class FakeRetriever:
     embedding_provider = FakeEmbeddingProvider()
 
-    def __init__(self, *, empty: bool = False) -> None:
+    def __init__(
+        self, *, empty: bool = False, category: str = "authentication"
+    ) -> None:
         self.empty = empty
+        self.category = category
 
     def retrieve_query(
         self,
@@ -48,16 +60,21 @@ class FakeRetriever:
         category: str | None = None,
     ) -> list[RetrievedChunk]:
         assert len(query_text) <= 2_000
-        assert category == "authentication"
+        assert category == self.category
         if self.empty:
             return []
+        source_id = {
+            "authentication": "runbook-jwt-authentication",
+            "database": "runbook-postgresql-connectivity",
+            "http": "runbook-http-timeouts",
+        }.get(self.category, "runbook-generic")
         return [
             RetrievedChunk(
                 chunk_id=7,
-                source_id="runbook-jwt-authentication",
-                title="JWT and Authentication Failures",
+                source_id=source_id,
+                title=f"{self.category.title()} Runbook",
                 category=category or "authentication",
-                content="Expired tokens must be refreshed after issuer checks.",
+                content="Use bounded diagnostics from the approved local runbook.",
                 similarity=0.95,
             )
         ][:top_k]
@@ -86,7 +103,12 @@ class ScriptedProvider:
         response = self.responses.popleft()
         if isinstance(response, Exception):
             raise response
-        return response_model.model_validate(response)
+        try:
+            return response_model.model_validate(response)
+        except ValidationError as exc:
+            raise StructuredOutputValidationError(
+                f"Structured output failed validation: {exc}"
+            ) from exc
 
 
 def tool_plan(name: str, arguments: dict[str, object]) -> dict[str, object]:
@@ -112,7 +134,10 @@ def final_plan() -> dict[str, object]:
 
 
 def final_response(
-    *, bad_citation: bool = False, insufficient: bool = False
+    *,
+    bad_citation: bool = False,
+    insufficient: bool = False,
+    source_id: str = "runbook-jwt-authentication",
 ) -> dict[str, object]:
     return {
         "summary": "The request used an expired JWT.",
@@ -124,9 +149,7 @@ def final_response(
             if insufficient
             else [
                 {
-                    "source_id": "invented"
-                    if bad_citation
-                    else "runbook-jwt-authentication",
+                    "source_id": "invented" if bad_citation else source_id,
                     "chunk_id": 7,
                 }
             ]
@@ -165,16 +188,49 @@ def event_for(incident_id: int) -> IncidentCreatedEvent:
     )
 
 
+def persist_database_pool_incident(
+    session_factory: sessionmaker[Session],
+) -> IncidentRecord:
+    """Reproduce the sanitized fields from the live billing pool incident."""
+    with session_factory() as session:
+        incident = IncidentRecord(
+            service="billing-api",
+            error="PostgreSQL connection pool exhausted",
+            log="pool timeout while waiting for an available database connection",
+            requested_severity="critical",
+            resolved_severity="critical",
+            classification="database_connection_error",
+            probable_cause="The database connection pool has no available capacity.",
+            recommended_actions=["Inspect pool utilization and slow transactions."],
+        )
+        session.add(incident)
+        session.commit()
+        return incident
+
+
+def database_event_for(incident_id: int) -> IncidentCreatedEvent:
+    return IncidentCreatedEvent.create(
+        incident_id=incident_id,
+        service="billing-api",
+        classification=IncidentClassification.DATABASE_CONNECTION_ERROR,
+        severity=Severity.CRITICAL,
+    )
+
+
 def workflow_for(
     session_factory: sessionmaker[Session],
     provider: ScriptedProvider,
     *,
     empty_retrieval: bool = False,
+    retrieval_category: str = "authentication",
     repairs: int = 2,
 ) -> ControlledAgentWorkflow:
     return ControlledAgentWorkflow(
         session_factory,
-        FakeRetriever(empty=empty_retrieval),  # type: ignore[arg-type]
+        FakeRetriever(  # type: ignore[arg-type]
+            empty=empty_retrieval,
+            category=retrieval_category,
+        ),
         provider,  # type: ignore[arg-type]
         AgentLimits(
             max_steps=8,
@@ -385,6 +441,147 @@ def test_second_retrieval_is_rejected_even_with_different_query(
             )
         )
     assert steps[2].outcome == "repeated_tool_call"
+
+
+def test_database_pool_incident_uses_grounded_final_after_bounded_planner_repairs(
+    session_factory: sessionmaker[Session],
+) -> None:
+    incident = persist_database_pool_incident(session_factory)
+    invalid_shape = {
+        "goal": "Resolve the database connection incident.",
+        "next_action": "tool",
+        "tool_arguments": {"incident_id": incident.id},
+        "reason_summary": "Additional evidence may help.",
+        "expected_evidence": "Database pool evidence.",
+    }
+    provider = ScriptedProvider(
+        [
+            tool_plan("get_incident", {"incident_id": incident.id}),
+            tool_plan(
+                "retrieve_runbooks",
+                {
+                    "query": "PostgreSQL connection pool exhausted pool timeout",
+                    "classification": "database_connection_error",
+                    "top_k": 4,
+                },
+            ),
+            *[dict(invalid_shape) for _ in range(3)],
+            final_response(source_id="runbook-postgresql-connectivity")
+            | {
+                "summary": "The billing API exhausted its PostgreSQL pool.",
+                "root_cause": "Connections remained occupied until pool timeout.",
+                "recommended_actions": [
+                    "Inspect pool utilization and long-running transactions."
+                ],
+                "evidence_summary": (
+                    "Incident metadata and the PostgreSQL runbook agree."
+                ),
+            },
+        ]
+    )
+
+    outcome = workflow_for(
+        session_factory,
+        provider,
+        retrieval_category="database",
+    ).resolve(database_event_for(incident.id))
+
+    assert outcome.value == "completed"
+    with session_factory() as session:
+        execution = session.scalar(select(AgentExecutionRecord))
+        resolution = session.scalar(select(AIResolutionRecord))
+        steps = list(
+            session.scalars(
+                select(AgentStepRecord).order_by(AgentStepRecord.step_number)
+            )
+        )
+    assert execution is not None
+    assert execution.status == "awaiting_review"
+    assert execution.retry_count == 0
+    assert execution.model_call_count == 6
+    assert resolution is not None
+    assert resolution.status == "completed"
+    assert resolution.cited_sources == [
+        {"source_id": "runbook-postgresql-connectivity", "chunk_id": 7}
+    ]
+    assert [step.outcome for step in steps] == ["succeeded", "succeeded", "completed"]
+    assert provider.calls == 6
+
+
+def test_planner_normalizes_only_unambiguous_structured_fields() -> None:
+    final = PlannerDecision.model_validate(
+        {
+            "goal": "Produce the grounded response.",
+            "next_action": "final-answer",
+            "tool_name": "",
+            "tool_arguments": {},
+            "reason_summary": "Required evidence is present.",
+            "expected_evidence": "A cited response.",
+        }
+    )
+    assert final.next_action == "final"
+    assert final.tool_name is None
+    assert final.tool_arguments is None
+
+    required = RequiredIncidentDecision.model_validate(
+        {
+            "goal": "Load the incident.",
+            "arguments": {"incident_id": 7},
+            "reason_summary": "Incident evidence is mandatory.",
+            "expected_evidence": "Sanitized incident metadata.",
+        }
+    )
+    assert required.next_action == "tool"
+    assert required.tool_name == "get_incident"
+    assert required.tool_arguments.incident_id == 7
+
+    retrieval = RequiredRetrievalDecision.model_validate(
+        {
+            "goal": "Load a runbook.",
+            "next_action": "tool-call",
+            "tool": "retrieve_runbooks",
+            "arguments": {"query": "database pool timeout"},
+            "reason_summary": "Runbook evidence is mandatory.",
+            "expected_evidence": "Relevant approved runbook chunks.",
+        }
+    )
+    assert retrieval.tool_name == "retrieve_runbooks"
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        {
+            "goal": "Choose another tool.",
+            "next_action": "tool",
+            "tool_arguments": {"incident_id": 18},
+            "reason_summary": "More evidence may be useful.",
+            "expected_evidence": "Additional evidence.",
+        },
+        {
+            "goal": "Choose an action.",
+            "next_action": "execute",
+            "tool_name": None,
+            "tool_arguments": None,
+            "reason_summary": "The action is not a recognized planner literal.",
+            "expected_evidence": "Unknown.",
+        },
+        {
+            "goal": "Conflicting tool fields.",
+            "next_action": "tool",
+            "tool_name": "get_incident",
+            "tool": "retrieve_runbooks",
+            "tool_arguments": {"incident_id": 18},
+            "reason_summary": "The aliases conflict.",
+            "expected_evidence": "Unknown.",
+        },
+    ],
+)
+def test_planner_rejects_ambiguous_or_unsafe_shapes(
+    payload: dict[str, object],
+) -> None:
+    with pytest.raises(ValueError):
+        PlannerDecision.model_validate(payload)
 
 
 def test_planner_models_reject_extra_fields() -> None:

@@ -30,6 +30,10 @@ class ProviderResponseError(ProviderError):
     """The provider returned an unusable or schema-incompatible response."""
 
 
+class StructuredOutputValidationError(ProviderResponseError):
+    """The provider returned JSON that failed the requested structured schema."""
+
+
 class LLMProvider(Protocol):
     """Generate a response that has been validated against a Pydantic schema."""
 
