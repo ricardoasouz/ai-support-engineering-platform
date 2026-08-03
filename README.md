@@ -17,23 +17,28 @@ Client
   v
 FastAPI POST /api/v1/incidents
   |
-  +--> deterministic analysis
+  +--> Deterministic analysis
   |
-  +--> one PostgreSQL transaction
-         +-- incidents row
-         +-- outbox_events row (incident.created)
+  +--> PostgreSQL transaction
+  |      +-- incidents
+  |      +-- outbox_events (incident.created)
   |
-  +--> commit succeeds
-  |
-  +--> outbox dispatcher --acknowledged publish--> Kafka incident.created
-             |                                      |
-             +-- broker failure: retain + retry     v
-                                               worker consumer group
-                                                      |
-                                                      +-- validate envelope
-                                                      +-- deterministic processing
-                                                      +-- processed_events insert
-                                                      +-- commit Kafka offset
+  +--> Commit
+         |
+         v
+   Outbox Dispatcher
+         |
+         +-- Publish acknowledged --> Kafka: incident.created
+         |
+         +-- Broker unavailable --> retain + retry
+                                      |
+                                      v
+                               Worker Consumer Group
+                                      |
+                                      +-- Validate event
+                                      +-- Deterministic processing
+                                      +-- Insert processed_events
+                                      +-- Commit Kafka offset
 ```
 
 HTTP routes do not contain Kafka client code. The incident application service
