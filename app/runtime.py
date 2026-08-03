@@ -14,10 +14,11 @@ _ROOT = Path(__file__).resolve().parents[1]
 
 
 def run_api() -> None:
-    """Validate configuration, migrate once, and start Uvicorn."""
+    """Validate configuration, optionally migrate, and start Uvicorn."""
     settings = get_settings()
-    alembic_config = Config(str(_ROOT / "alembic.ini"))
-    command.upgrade(alembic_config, "head")
+    if settings.run_database_migrations_on_startup:
+        alembic_config = Config(str(_ROOT / "alembic.ini"))
+        command.upgrade(alembic_config, "head")
 
     import uvicorn
 
@@ -31,12 +32,16 @@ def run_api() -> None:
 
 
 def run_worker() -> None:
-    """Validate configuration, ingest bundled knowledge, and start consumption."""
-    get_settings()
-    from app.knowledge.ingest import main as ingest_knowledge
+    """Validate configuration, optionally ingest knowledge, and consume events."""
+    settings = get_settings()
+
+    if settings.run_knowledge_ingestion_on_startup:
+        from app.knowledge.ingest import main as ingest_knowledge
+
+        ingest_knowledge()
+
     from app.workers.incident_worker import main as run_incident_worker
 
-    ingest_knowledge()
     run_incident_worker()
 
 
