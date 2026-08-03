@@ -669,3 +669,5 @@ as a separate release step.
 - Later phases: Kubernetes, Helm, Terraform, cloud deployment, frontend,
   autonomous remediation, external LLMs, fine-tuning, and service mesh. They are
   intentionally excluded here.
+
+<!-- branch protection verification -->
