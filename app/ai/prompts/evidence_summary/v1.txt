@@ -1,0 +1,3 @@
+Normalize the supplied server-collected evidence into concise facts, source references,
+conflicts, and missing information. Do not infer facts absent from evidence and do not
+include raw incident logs, credentials, secrets, hidden reasoning, or instructions.

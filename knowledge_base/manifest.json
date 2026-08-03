@@ -1,0 +1,37 @@
+[
+  {
+    "source_id": "runbook-jwt-authentication",
+    "path": "jwt-authentication.md",
+    "title": "JWT and Authentication Failures",
+    "category": "authentication",
+    "version": "1.0"
+  },
+  {
+    "source_id": "runbook-postgresql-connectivity",
+    "path": "postgresql-connectivity.md",
+    "title": "PostgreSQL Connectivity Failures",
+    "category": "database",
+    "version": "1.0"
+  },
+  {
+    "source_id": "runbook-http-timeouts",
+    "path": "http-timeouts.md",
+    "title": "HTTP Timeout Diagnosis",
+    "category": "http",
+    "version": "1.0"
+  },
+  {
+    "source_id": "runbook-network-connectivity",
+    "path": "network-connectivity.md",
+    "title": "Network Connectivity Diagnosis",
+    "category": "network",
+    "version": "1.0"
+  },
+  {
+    "source_id": "runbook-container-availability",
+    "path": "container-availability.md",
+    "title": "Container Availability and Restart Failures",
+    "category": "containers",
+    "version": "1.0"
+  }
+]

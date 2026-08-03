@@ -5,9 +5,12 @@ import signal
 from pathlib import Path
 from threading import Event
 
+from app.agent.workflow import AgentLimits, ControlledAgentWorkflow
+from app.ai.providers.factory import create_embedding_provider, create_llm_provider
 from app.core.config import get_settings
 from app.core.logging import configure_logging
 from app.db.session import get_session_factory
+from app.knowledge.retrieval import KnowledgeRetriever
 from app.workers.processor import IncidentEventProcessor
 from app.workers.runner import IncidentMessageHandler, KafkaIncidentWorker
 
@@ -28,9 +31,33 @@ def main() -> None:
     signal.signal(signal.SIGTERM, request_shutdown)
     signal.signal(signal.SIGINT, request_shutdown)
 
+    session_factory = get_session_factory()
+    embedding_provider = create_embedding_provider(settings)
+    workflow = ControlledAgentWorkflow(
+        session_factory,
+        KnowledgeRetriever(
+            session_factory,
+            embedding_provider,
+            settings.knowledge_retrieval_top_k,
+        ),
+        create_llm_provider(settings),
+        AgentLimits(
+            max_steps=settings.agent_max_steps,
+            max_tool_calls=settings.agent_max_tool_calls,
+            max_repeated_tool_calls=settings.agent_max_repeated_tool_calls,
+            max_retrieval_chunks=settings.agent_max_retrieval_chunks,
+            max_duration_seconds=settings.agent_max_duration_seconds,
+            tool_timeout_seconds=settings.agent_tool_timeout_seconds,
+            model_retries=settings.agent_model_retries,
+            repair_attempts=settings.agent_repair_attempts,
+        ),
+        planner_prompt_version=settings.agent_planner_prompt_version,
+        resolver_prompt_version=settings.agent_resolver_prompt_version,
+    )
     processor = IncidentEventProcessor(
-        get_session_factory(),
+        session_factory,
         settings.kafka_consumer_group,
+        workflow,
     )
     worker = KafkaIncidentWorker(
         settings,

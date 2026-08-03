@@ -15,11 +15,34 @@ x-app-environment: &app-environment
   KAFKA_OUTBOX_BATCH_SIZE: ${KAFKA_OUTBOX_BATCH_SIZE:-20}
   KAFKA_WORKER_CLIENT_ID: ${KAFKA_WORKER_CLIENT_ID:-incident-worker}
   KAFKA_WORKER_POLL_TIMEOUT_SECONDS: ${KAFKA_WORKER_POLL_TIMEOUT_SECONDS:-1}
+  KAFKA_WORKER_MAX_POLL_INTERVAL_MS: ${KAFKA_WORKER_MAX_POLL_INTERVAL_MS:-900000}
   KAFKA_WORKER_RETRY_BACKOFF_SECONDS: ${KAFKA_WORKER_RETRY_BACKOFF_SECONDS:-2}
+  LLM_PROVIDER: ${LLM_PROVIDER:-ollama}
+  EMBEDDING_PROVIDER: ${EMBEDDING_PROVIDER:-ollama}
+  OLLAMA_BASE_URL: ${OLLAMA_BASE_URL:-http://ollama:11434}
+  OLLAMA_LLM_MODEL: ${OLLAMA_LLM_MODEL:-qwen2.5:1.5b-instruct}
+  OLLAMA_EMBEDDING_MODEL: ${OLLAMA_EMBEDDING_MODEL:-nomic-embed-text:v1.5}
+  OLLAMA_REQUEST_TIMEOUT_SECONDS: ${OLLAMA_REQUEST_TIMEOUT_SECONDS:-180}
+  EMBEDDING_DIMENSIONS: ${EMBEDDING_DIMENSIONS:-768}
+  KNOWLEDGE_BASE_PATH: ${KNOWLEDGE_BASE_PATH:-/app/knowledge_base}
+  KNOWLEDGE_CHUNK_SIZE: ${KNOWLEDGE_CHUNK_SIZE:-900}
+  KNOWLEDGE_RETRIEVAL_TOP_K: ${KNOWLEDGE_RETRIEVAL_TOP_K:-4}
+  AI_MAX_ATTEMPTS: ${AI_MAX_ATTEMPTS:-5}
+  AI_PROCESSING_STALE_SECONDS: ${AI_PROCESSING_STALE_SECONDS:-900}
+  AGENT_MAX_STEPS: ${AGENT_MAX_STEPS:-8}
+  AGENT_MAX_TOOL_CALLS: ${AGENT_MAX_TOOL_CALLS:-6}
+  AGENT_MAX_REPEATED_TOOL_CALLS: ${AGENT_MAX_REPEATED_TOOL_CALLS:-1}
+  AGENT_MAX_RETRIEVAL_CHUNKS: ${AGENT_MAX_RETRIEVAL_CHUNKS:-4}
+  AGENT_MAX_DURATION_SECONDS: ${AGENT_MAX_DURATION_SECONDS:-600}
+  AGENT_TOOL_TIMEOUT_SECONDS: ${AGENT_TOOL_TIMEOUT_SECONDS:-180}
+  AGENT_MODEL_RETRIES: ${AGENT_MODEL_RETRIES:-3}
+  AGENT_REPAIR_ATTEMPTS: ${AGENT_REPAIR_ATTEMPTS:-2}
+  AGENT_PLANNER_PROMPT_VERSION: ${AGENT_PLANNER_PROMPT_VERSION:-v1}
+  AGENT_RESOLVER_PROMPT_VERSION: ${AGENT_RESOLVER_PROMPT_VERSION:-v1}
 
 services:
   db:
-    image: postgres:17
+    image: pgvector/pgvector:0.8.5-pg17-trixie
     environment:
       POSTGRES_USER: ${POSTGRES_USER:?Set POSTGRES_USER in .env}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env}
@@ -33,6 +56,39 @@ services:
       retries: 10
       start_period: 10s
     restart: unless-stopped
+
+  ollama:
+    image: ollama/ollama:0.32.3
+    environment:
+      OLLAMA_HOST: 0.0.0.0:11434
+      OLLAMA_KEEP_ALIVE: ${OLLAMA_KEEP_ALIVE:-5m}
+    volumes:
+      - ollama_models:/root/.ollama
+    healthcheck:
+      test: ["CMD", "ollama", "list"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 20s
+    restart: unless-stopped
+
+  ollama-init:
+    image: ollama/ollama:0.32.3
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - >-
+        ollama pull "$${OLLAMA_LLM_MODEL}" &&
+        ollama pull "$${OLLAMA_EMBEDDING_MODEL}"
+    environment:
+      OLLAMA_HOST: http://ollama:11434
+      OLLAMA_LLM_MODEL: ${OLLAMA_LLM_MODEL:-qwen2.5:1.5b-instruct}
+      OLLAMA_EMBEDDING_MODEL: ${OLLAMA_EMBEDDING_MODEL:-nomic-embed-text:v1.5}
+    volumes:
+      - ollama_models:/root/.ollama
+    depends_on:
+      ollama:
+        condition: service_healthy
+    restart: "no"
 
   kafka:
     image: apache/kafka:4.3.1
@@ -106,7 +162,12 @@ services:
       context: .
       dockerfile: Dockerfile
     environment: *app-environment
-    command: ["python", "-m", "app.workers.incident_worker"]
+    command:
+      - sh
+      - -c
+      - >-
+        python -m app.knowledge.ingest &&
+        exec python -m app.workers.incident_worker
     depends_on:
       db:
         condition: service_healthy
@@ -114,6 +175,8 @@ services:
         condition: service_healthy
       api:
         condition: service_healthy
+      ollama-init:
+        condition: service_completed_successfully
     healthcheck:
       test: ["CMD-SHELL", "test -f /tmp/incident-worker-ready"]
       interval: 10s
@@ -126,3 +189,4 @@ services:
 volumes:
   postgres_data:
   kafka_data:
+  ollama_models:

@@ -133,3 +133,4 @@ def test_worker_consumer_configuration_requires_manual_offsets(
     assert captured["enable.auto.commit"] is False
     assert captured["enable.auto.offset.store"] is False
     assert captured["auto.offset.reset"] == "earliest"
+    assert captured["max.poll.interval.ms"] == 900_000

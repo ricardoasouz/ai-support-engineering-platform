@@ -27,6 +27,7 @@ class MessageOutcome(str, Enum):
     DUPLICATE = "duplicate"
     MALFORMED = "malformed"
     RETRY = "retry"
+    FAILED = "failed"
 
 
 class IncidentMessageHandler:
@@ -65,6 +66,8 @@ class IncidentMessageHandler:
 
         if outcome is ProcessingOutcome.DUPLICATE:
             return MessageOutcome.DUPLICATE
+        if outcome is ProcessingOutcome.FAILED:
+            return MessageOutcome.FAILED
         return MessageOutcome.PROCESSED
 
 
@@ -89,6 +92,7 @@ class KafkaIncidentWorker:
             "enable.auto.commit": False,
             "enable.auto.offset.store": False,
             "auto.offset.reset": "earliest",
+            "max.poll.interval.ms": settings.kafka_worker_max_poll_interval_ms,
             "logger": logging.getLogger("kafka.consumer"),
         }
         if consumer is None:

@@ -1,0 +1,85 @@
+{
+  "dataset_version": "phase5-v1",
+  "cases": [
+    {
+      "case_id": "jwt-expired",
+      "incident": {"service": "identity-api", "error": "JWT expired", "log": "token expiry validation failed", "severity": "high"},
+      "expected_classification": "authentication_error",
+      "expected_source_ids": ["runbook-jwt-authentication"],
+      "required_tools": ["get_incident", "retrieve_runbooks"],
+      "expect_escalation": false,
+      "max_steps": 6,
+      "max_tool_calls": 4
+    },
+    {
+      "case_id": "jwt-invalid-issuer-audience",
+      "incident": {"service": "identity-api", "error": "JWT invalid issuer and audience", "log": "issuer mismatch audience rejected", "severity": "high"},
+      "expected_classification": "authentication_error",
+      "expected_source_ids": ["runbook-jwt-authentication"],
+      "required_tools": ["get_incident", "retrieve_runbooks"],
+      "expect_escalation": false,
+      "max_steps": 6,
+      "max_tool_calls": 4
+    },
+    {
+      "case_id": "postgres-connection-refused",
+      "incident": {"service": "billing-api", "error": "PostgreSQL connection refused", "log": "could not connect to server: connection refused", "severity": "critical"},
+      "expected_classification": "database_connection_error",
+      "expected_source_ids": ["runbook-postgresql-connectivity"],
+      "required_tools": ["get_incident", "retrieve_runbooks"],
+      "expect_escalation": false,
+      "max_steps": 6,
+      "max_tool_calls": 4
+    },
+    {
+      "case_id": "postgres-pool-exhausted",
+      "incident": {"service": "orders-api", "error": "connection pool exhausted", "log": "connection pool timeout while acquiring connection", "severity": "high"},
+      "expected_classification": "database_connection_error",
+      "expected_source_ids": ["runbook-postgresql-connectivity"],
+      "required_tools": ["get_incident", "retrieve_runbooks"],
+      "expect_escalation": false,
+      "max_steps": 6,
+      "max_tool_calls": 4
+    },
+    {
+      "case_id": "gateway-timeout",
+      "incident": {"service": "gateway", "error": "upstream gateway timeout", "log": "HTTP 504 upstream request timed out", "severity": "high"},
+      "expected_classification": "timeout_error",
+      "expected_source_ids": ["runbook-http-timeouts"],
+      "required_tools": ["get_incident", "retrieve_runbooks"],
+      "expect_escalation": false,
+      "max_steps": 6,
+      "max_tool_calls": 4
+    },
+    {
+      "case_id": "dns-network-failure",
+      "incident": {"service": "notifications", "error": "DNS lookup failed", "log": "temporary failure in name resolution", "severity": "medium"},
+      "expected_classification": "unknown_error",
+      "expected_source_ids": ["runbook-network-connectivity"],
+      "required_tools": ["get_incident", "retrieve_runbooks"],
+      "expect_escalation": false,
+      "max_steps": 6,
+      "max_tool_calls": 4
+    },
+    {
+      "case_id": "container-unavailable",
+      "incident": {"service": "worker", "error": "container unavailable", "log": "container exited and health check failed", "severity": "critical"},
+      "expected_classification": "unknown_error",
+      "expected_source_ids": ["runbook-container-availability"],
+      "required_tools": ["get_incident", "retrieve_runbooks"],
+      "expect_escalation": false,
+      "max_steps": 6,
+      "max_tool_calls": 4
+    },
+    {
+      "case_id": "insufficient-evidence",
+      "incident": {"service": "unknown-service", "error": "unrecognized subsystem state", "log": "no matching diagnostics", "severity": "medium"},
+      "expected_classification": "unknown_error",
+      "expected_source_ids": [],
+      "required_tools": ["get_incident", "retrieve_runbooks"],
+      "expect_escalation": true,
+      "max_steps": 6,
+      "max_tool_calls": 4
+    }
+  ]
+}

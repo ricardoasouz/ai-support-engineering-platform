@@ -26,10 +26,17 @@ def test_initial_migration_creates_incident_schema(tmp_path: Path) -> None:
         inspector = inspect(engine)
 
         assert set(inspector.get_table_names()) == {
+            "agent_executions",
+            "agent_steps",
+            "ai_resolutions",
             "alembic_version",
             "incidents",
+            "knowledge_chunks",
+            "knowledge_documents",
+            "knowledge_embeddings",
             "outbox_events",
             "processed_events",
+            "resolution_feedback",
         }
         assert {column["name"] for column in inspector.get_columns("incidents")} == {
             "id",
@@ -76,7 +83,7 @@ def test_initial_migration_creates_incident_schema(tmp_path: Path) -> None:
         with engine.connect() as connection:
             assert connection.scalar(
                 text("SELECT version_num FROM alembic_version")
-            ) == ("20260803_0002")
+            ) == ("20260803_0004")
         engine.dispose()
     finally:
         environ["DATABASE_URL"] = previous_database_url

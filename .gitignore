@@ -3,6 +3,7 @@ __pycache__/
 *.py[cod]
 *$py.class
 .pytest_cache/
+.test-tmp-*/
 .hypothesis/
 .mypy_cache/
 .ruff_cache/
@@ -28,6 +29,7 @@ env/
 coverage.xml
 htmlcov/
 junit.xml
+evaluation_reports/
 build/
 dist/
 *.egg-info/

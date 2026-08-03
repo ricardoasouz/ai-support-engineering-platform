@@ -36,8 +36,11 @@ async def lifespan(_: FastAPI) -> AsyncIterator[None]:
 
 app = FastAPI(
     title="AI Support Engineering Platform",
-    description="Event-driven deterministic incident analysis API for support teams.",
-    version="0.3.0",
+    description=(
+        "Event-driven incident analysis with bounded, auditable support-agent "
+        "resolutions."
+    ),
+    version="0.5.0",
     lifespan=lifespan,
 )
 app.include_router(api_router)
