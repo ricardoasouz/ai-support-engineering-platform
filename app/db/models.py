@@ -2,7 +2,18 @@
 
 from datetime import datetime
 
-from sqlalchemy import JSON, CheckConstraint, DateTime, Index, String, Text, func
+from sqlalchemy import (
+    JSON,
+    CheckConstraint,
+    DateTime,
+    ForeignKey,
+    Index,
+    Integer,
+    String,
+    Text,
+    func,
+    text,
+)
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.db.base import Base
@@ -50,3 +61,69 @@ class IncidentRecord(Base):
 
     def __repr__(self) -> str:
         return f"IncidentRecord(id={self.id!r}, service={self.service!r})"
+
+
+class OutboxEventRecord(Base):
+    """A domain event awaiting or recording successful Kafka publication."""
+
+    __tablename__ = "outbox_events"
+    __table_args__ = (
+        CheckConstraint("attempts >= 0", name="attempts_non_negative"),
+        Index(
+            "ix_outbox_events_pending",
+            "published_at",
+            "next_attempt_at",
+        ),
+        Index("ix_outbox_events_incident_id", "incident_id"),
+    )
+
+    event_id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    incident_id: Mapped[int] = mapped_column(
+        ForeignKey("incidents.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    event_type: Mapped[str] = mapped_column(String(100), nullable=False)
+    topic: Mapped[str] = mapped_column(String(255), nullable=False)
+    payload: Mapped[dict[str, object]] = mapped_column(JSON, nullable=False)
+    attempts: Mapped[int] = mapped_column(
+        Integer,
+        nullable=False,
+        server_default=text("0"),
+    )
+    next_attempt_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        server_default=func.now(),
+    )
+    last_error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    published_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True),
+        nullable=True,
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        server_default=func.now(),
+    )
+
+
+class ProcessedEventRecord(Base):
+    """Worker idempotency record and deterministic processing result."""
+
+    __tablename__ = "processed_events"
+    __table_args__ = (Index("ix_processed_events_incident_id", "incident_id"),)
+
+    event_id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    event_type: Mapped[str] = mapped_column(String(100), nullable=False)
+    event_version: Mapped[int] = mapped_column(Integer, nullable=False)
+    incident_id: Mapped[int] = mapped_column(
+        ForeignKey("incidents.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    consumer_group: Mapped[str] = mapped_column(String(255), nullable=False)
+    processing_result: Mapped[dict[str, object]] = mapped_column(JSON, nullable=False)
+    processed_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        server_default=func.now(),
+    )

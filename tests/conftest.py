@@ -10,10 +10,20 @@ from sqlalchemy.orm import Session, sessionmaker
 from sqlalchemy.pool import StaticPool
 
 environ.setdefault("DATABASE_URL", "sqlite+pysqlite:///:memory:")
+environ.setdefault("KAFKA_ENABLED", "false")
 
 from app.db.base import Base
 from app.db.session import get_db
+from app.events.dependencies import get_outbox_dispatcher
+from app.events.dispatcher import DispatchOutcome
 from app.main import app
+
+
+class DeferredTestDispatcher:
+    """Keep API tests broker-independent while preserving durable outbox rows."""
+
+    def dispatch_event(self, _event_id: str) -> DispatchOutcome:
+        return DispatchOutcome.DEFERRED
 
 
 @pytest.fixture
@@ -42,6 +52,7 @@ def client(
             yield session
 
     app.dependency_overrides[get_db] = override_get_db
+    app.dependency_overrides[get_outbox_dispatcher] = DeferredTestDispatcher
     try:
         with TestClient(app) as test_client:
             yield test_client

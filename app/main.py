@@ -11,6 +11,7 @@ from fastapi import Request as FastAPIRequest
 from app.api.router import api_router
 from app.core.config import get_settings
 from app.core.logging import configure_logging
+from app.events.dependencies import get_outbox_retry_service
 
 logger = logging.getLogger(__name__)
 
@@ -21,14 +22,22 @@ async def lifespan(_: FastAPI) -> AsyncIterator[None]:
     settings = get_settings()
     configure_logging(settings.log_level)
     logger.info("application_started")
-    yield
-    logger.info("application_stopped")
+    retry_service = None
+    if settings.kafka_enabled:
+        retry_service = get_outbox_retry_service()
+        retry_service.start()
+    try:
+        yield
+    finally:
+        if retry_service is not None:
+            retry_service.stop()
+        logger.info("application_stopped")
 
 
 app = FastAPI(
     title="AI Support Engineering Platform",
-    description="Persistent deterministic incident analysis API for support teams.",
-    version="0.2.0",
+    description="Event-driven deterministic incident analysis API for support teams.",
+    version="0.3.0",
     lifespan=lifespan,
 )
 app.include_router(api_router)

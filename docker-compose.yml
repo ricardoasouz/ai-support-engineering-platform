@@ -1,3 +1,22 @@
+x-app-environment: &app-environment
+  DATABASE_URL: postgresql+psycopg://${POSTGRES_USER:?Set POSTGRES_USER in .env}:${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env}@db:5432/${POSTGRES_DB:?Set POSTGRES_DB in .env}
+  LOG_LEVEL: ${LOG_LEVEL:-INFO}
+  KAFKA_ENABLED: ${KAFKA_ENABLED:-true}
+  KAFKA_BOOTSTRAP_SERVERS: ${KAFKA_BOOTSTRAP_SERVERS:-kafka:9092}
+  KAFKA_INCIDENT_CREATED_TOPIC: ${KAFKA_INCIDENT_CREATED_TOPIC:-incident.created}
+  KAFKA_TOPIC_PARTITIONS: ${KAFKA_TOPIC_PARTITIONS:-3}
+  KAFKA_CONSUMER_GROUP: ${KAFKA_CONSUMER_GROUP:-incident-processing-v1}
+  KAFKA_PRODUCER_CLIENT_ID: ${KAFKA_PRODUCER_CLIENT_ID:-support-api}
+  KAFKA_PRODUCER_ACKS: ${KAFKA_PRODUCER_ACKS:-all}
+  KAFKA_PRODUCER_ENABLE_IDEMPOTENCE: ${KAFKA_PRODUCER_ENABLE_IDEMPOTENCE:-true}
+  KAFKA_PRODUCER_DELIVERY_TIMEOUT_MS: ${KAFKA_PRODUCER_DELIVERY_TIMEOUT_MS:-5000}
+  KAFKA_PRODUCER_RETRIES: ${KAFKA_PRODUCER_RETRIES:-5}
+  KAFKA_OUTBOX_POLL_INTERVAL_SECONDS: ${KAFKA_OUTBOX_POLL_INTERVAL_SECONDS:-5}
+  KAFKA_OUTBOX_BATCH_SIZE: ${KAFKA_OUTBOX_BATCH_SIZE:-20}
+  KAFKA_WORKER_CLIENT_ID: ${KAFKA_WORKER_CLIENT_ID:-incident-worker}
+  KAFKA_WORKER_POLL_TIMEOUT_SECONDS: ${KAFKA_WORKER_POLL_TIMEOUT_SECONDS:-1}
+  KAFKA_WORKER_RETRY_BACKOFF_SECONDS: ${KAFKA_WORKER_RETRY_BACKOFF_SECONDS:-2}
+
 services:
   db:
     image: postgres:17
@@ -15,13 +34,48 @@ services:
       start_period: 10s
     restart: unless-stopped
 
+  kafka:
+    image: apache/kafka:4.3.1
+    hostname: kafka
+    environment:
+      KAFKA_NODE_ID: 1
+      KAFKA_PROCESS_ROLES: broker,controller
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT
+      KAFKA_LISTENERS: PLAINTEXT://:9092,CONTROLLER://:9093
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:9092
+      KAFKA_INTER_BROKER_LISTENER_NAME: PLAINTEXT
+      KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
+      KAFKA_CONTROLLER_QUORUM_VOTERS: 1@kafka:9093
+      CLUSTER_ID: 4L6g3nShT-eMCtK--X86sw
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
+      KAFKA_SHARE_COORDINATOR_STATE_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_SHARE_COORDINATOR_STATE_TOPIC_MIN_ISR: 1
+      KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: 0
+      KAFKA_DEFAULT_REPLICATION_FACTOR: 1
+      KAFKA_NUM_PARTITIONS: ${KAFKA_TOPIC_PARTITIONS:-3}
+      KAFKA_AUTO_CREATE_TOPICS_ENABLE: "true"
+      KAFKA_LOG_DIRS: /var/lib/kafka/data
+    volumes:
+      - kafka_data:/var/lib/kafka
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - >-
+          /opt/kafka/bin/kafka-topics.sh --bootstrap-server localhost:9092
+          --list >/dev/null 2>&1
+      interval: 10s
+      timeout: 10s
+      retries: 12
+      start_period: 20s
+    restart: unless-stopped
+
   api:
     build:
       context: .
       dockerfile: Dockerfile
-    environment:
-      DATABASE_URL: postgresql+psycopg://${POSTGRES_USER:?Set POSTGRES_USER in .env}:${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env}@db:5432/${POSTGRES_DB:?Set POSTGRES_DB in .env}
-      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+    environment: *app-environment
     command:
       - sh
       - -c
@@ -47,5 +101,28 @@ services:
       start_period: 15s
     restart: unless-stopped
 
+  worker:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    environment: *app-environment
+    command: ["python", "-m", "app.workers.incident_worker"]
+    depends_on:
+      db:
+        condition: service_healthy
+      kafka:
+        condition: service_healthy
+      api:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "test -f /tmp/incident-worker-ready"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+      start_period: 15s
+    stop_grace_period: 30s
+    restart: unless-stopped
+
 volumes:
   postgres_data:
+  kafka_data:

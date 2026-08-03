@@ -6,6 +6,8 @@ from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy.orm import Session
 
 from app.db.session import get_db
+from app.events.dependencies import get_outbox_dispatcher
+from app.events.dispatcher import OutboxDispatcher
 from app.models.incident import (
     MAX_SERVICE_LENGTH,
     IncidentAnalysisResponse,
@@ -30,9 +32,10 @@ router = APIRouter(prefix="/incidents", tags=["incidents"])
 def analyze_incident_report(
     incident: IncidentRequest,
     session: Annotated[Session, Depends(get_db)],
+    dispatcher: Annotated[OutboxDispatcher, Depends(get_outbox_dispatcher)],
 ) -> IncidentAnalysisResponse:
     """Analyze and persist an incident using deterministic rules."""
-    return analyze_and_persist_incident(incident, session)
+    return analyze_and_persist_incident(incident, session, dispatcher)
 
 
 @router.get(

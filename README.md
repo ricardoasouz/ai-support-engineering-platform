@@ -1,99 +1,171 @@
 # AI Support Engineering Platform
 
-AI Support Engineering Platform is an incrementally developed portfolio project
-for analyzing technical support incidents. Phase 2 provides a persistent FastAPI
-service: deterministic incident analysis is stored in PostgreSQL and can be
-retrieved through a versioned API. Docker Compose supplies a reproducible API and
-database stack.
+AI Support Engineering Platform is an incrementally developed incident-analysis
+service. Phase 3 keeps the synchronous FastAPI and PostgreSQL behavior from the
+first two phases and adds Kafka-backed asynchronous processing through a separate
+worker.
 
-The analyzer remains deliberately rule-based. Kafka, LLMs, RAG, vector databases,
-Kubernetes, cloud deployment, CI/CD, and observability backends are not part of
-Phase 2.
+The analyzer and worker remain deterministic. Phase 3 does not include an LLM,
+RAG, embeddings, a vector database, Kubernetes, CI/CD, cloud deployment, or an
+observability backend.
 
-## Phase 2 architecture
+## Phase 3 architecture
 
 ```text
 Client
   |
   v
-FastAPI routes + Pydantic validation (app/api, app/models)
+FastAPI POST /api/v1/incidents
   |
-  v
-Incident workflow (app/services/incidents.py)
-  |                         |
-  v                         v
-Deterministic analyzer      Repository (app/repositories)
-                            |
-                            v
-                  SQLAlchemy 2.x session + ORM (app/db)
-                            |
-                            v
-                       PostgreSQL 17
-
-Alembic migrations (migrations/) ---> PostgreSQL schema
-Environment settings (app/core/) ---> API and database configuration
-Structured JSON logging ------------> standard output
+  +--> deterministic analysis
+  |
+  +--> one PostgreSQL transaction
+         +-- incidents row
+         +-- outbox_events row (incident.created)
+  |
+  +--> commit succeeds
+  |
+  +--> outbox dispatcher --acknowledged publish--> Kafka incident.created
+             |                                      |
+             +-- broker failure: retain + retry     v
+                                               worker consumer group
+                                                      |
+                                                      +-- validate envelope
+                                                      +-- deterministic processing
+                                                      +-- processed_events insert
+                                                      +-- commit Kafka offset
 ```
 
-The boundaries keep HTTP handling, deterministic analysis, application workflow,
-and persistence separate. A POST is analyzed first and then its input and output
-are written in one database transaction. Retrieval queries go through the
-repository rather than embedding SQLAlchemy operations in the routes.
+HTTP routes do not contain Kafka client code. The incident application service
+owns the database transaction, the outbox dispatcher owns publication state, and
+the worker owns consumption and asynchronous processing.
 
 Important files:
 
 ```text
 app/
-  main.py                    # FastAPI lifecycle and request logging
-  api/routes/incidents.py    # Analyze, list, and retrieve endpoints
-  core/config.py             # Environment settings
-  core/logging.py            # JSON log formatter/configuration
-  db/base.py                 # Declarative base and naming convention
-  db/models.py               # Incident ORM mapping
-  db/session.py              # Engine/session lifecycle
-  models/incident.py         # Request and response schemas
-  repositories/incidents.py  # Incident reads and writes
-  services/analyzer.py       # Ordered deterministic rules
-  services/incidents.py      # Analyze-and-persist transaction
-migrations/                  # Alembic environment and revisions
-tests/                       # Analyzer, API, and persistence tests
-Dockerfile                   # Non-root production-style API image
-docker-compose.yml           # API + PostgreSQL 17 local stack
+  main.py                      # API lifecycle and outbox retry thread
+  api/routes/incidents.py      # Analyze, list, and retrieve endpoints
+  core/config.py               # PostgreSQL and Kafka environment settings
+  db/models.py                 # Incident, outbox, and idempotency mappings
+  events/models.py             # Versioned incident.created envelope
+  events/producer.py           # Kafka producer and topic abstraction
+  events/dispatcher.py         # Durable outbox dispatch and retry loop
+  repositories/outbox.py       # Outbox persistence operations
+  services/incidents.py        # Incident + outbox transaction
+  workers/processor.py         # Idempotent deterministic processing
+  workers/runner.py            # Manual-offset Kafka consumer loop
+  workers/incident_worker.py   # Worker process entry point
+migrations/versions/           # Phase 2 and Phase 3 schema revisions
+docker-compose.yml             # API, PostgreSQL, Kafka, and worker
 ```
 
-## Persistence and database schema
+## Event flow and publication responsibilities
 
-SQLAlchemy 2.x maps the `incidents` table. Alembic owns schema changes; the API
-does not call `create_all` at runtime.
+`POST /api/v1/incidents` still returns the Phase 1 analysis response and stores
+the incident synchronously. In the same PostgreSQL transaction, it stages an
+`outbox_events` row. Kafka publication is attempted only after the transaction
+commits.
 
-| Column | Type | Notes |
-| --- | --- | --- |
-| `id` | integer | Primary key |
-| `service` | varchar(100) | Indexed, exact-match filter |
-| `error` | varchar(1000) | Submitted error summary |
-| `log` | text | Submitted log excerpt |
-| `requested_severity` | varchar(8), nullable | Optional caller override |
-| `resolved_severity` | varchar(8) | Analyzer result after override, indexed |
-| `classification` | varchar(50) | Deterministic classification, indexed |
-| `probable_cause` | text | Generated explanation |
-| `recommended_actions` | JSON | Ordered string list |
-| `created_at` | timestamp with time zone | Database-generated creation time |
+The producer abstraction:
 
-Check constraints protect the supported severity and classification values. The
-JSON column keeps recommendations as a structured ordered list without coupling
-the schema to a fixed number of actions.
+- creates the configured topic idempotently through Kafka's admin API;
+- keys records by `incident_id`, keeping one incident's order stable per
+  partition;
+- serializes the validated envelope as UTF-8 JSON;
+- uses `acks=all`, client idempotence, bounded retries, and a delivery timeout;
+- waits for broker acknowledgement before marking an outbox row published;
+- reports failures to the dispatcher without rolling back the incident.
+
+The background dispatcher retries due outbox rows with bounded exponential
+backoff. Multiple API workers use row locks with `SKIP LOCKED`, so they can drain
+the same outbox without intentionally publishing the same row concurrently.
+
+## Kafka topic and event schema
+
+Topic: `incident.created`
+
+The Compose default is three partitions and replication factor one. Replication
+factor one is appropriate only for the single-node local-development broker.
+Kafka is not exposed to the host; diagnostics use the CLI inside its container.
+
+Current envelope version:
+
+```json
+{
+  "event_id": "9be20b84-4ee5-47a5-a35d-9b7597d0c355",
+  "event_type": "incident.created",
+  "event_version": 1,
+  "occurred_at": "2026-08-03T12:30:00Z",
+  "incident_id": 42,
+  "service": "identity-api",
+  "classification": "authentication_error",
+  "severity": "high"
+}
+```
+
+`event_type` and `event_version` are strict literals. Timestamps must be
+timezone-aware. Unknown fields are rejected. Raw errors and logs stay in
+PostgreSQL and are deliberately not duplicated into Kafka.
+
+## Worker responsibilities
+
+The worker subscribes with the `incident-processing-v1` consumer group and
+disables automatic offset commits. For each message it:
+
+1. validates and deserializes the versioned envelope;
+2. verifies that the referenced incident is visible in PostgreSQL;
+3. derives a deterministic classification/severity routing key;
+4. inserts one `processed_events` record;
+5. commits the Kafka offset synchronously after processing.
+
+Malformed messages are logged and their offsets are committed so a poison
+message cannot block a partition. Missing incident rows and unexpected
+processing/commit errors are retryable: the worker seeks back to the same offset
+and does not commit it. SIGTERM and SIGINT request graceful consumer shutdown.
+
+## Delivery and idempotency semantics
+
+Phase 3 provides at-least-once delivery, not end-to-end exactly-once delivery.
+
+- The incident and outbox event are atomically durable in PostgreSQL.
+- A Kafka outage may delay publication but does not delete the incident or
+  pending event.
+- Producer acknowledgements and idempotent producer mode reduce transport-level
+  duplicates, but a crash between Kafka acknowledgement and the outbox update
+  can still cause an application-level resend.
+- `processed_events.event_id` is a primary key. Redeliveries and consumer
+  restarts therefore produce a duplicate outcome instead of repeating work.
+- Kafka offsets are committed only after successful, duplicate, or deliberately
+  discarded malformed-message handling.
+
+The `processed_events.processing_result` currently records
+`prepared_for_future_ai_processing` and a deterministic routing key. It is an
+extension point, not AI processing.
+
+## PostgreSQL schema
+
+Alembic owns all schema changes:
+
+- `incidents`: submitted incident and deterministic analysis.
+- `outbox_events`: minimal event payload, topic, attempt count, next retry,
+  failure detail, and publication timestamp.
+- `processed_events`: unique event ID, consumer group, referenced incident, and
+  deterministic result.
+
+Apply or inspect migrations:
+
+```bash
+docker compose exec api alembic upgrade head
+docker compose exec api alembic current
+docker compose exec api alembic check
+```
 
 ## API
 
-Interactive OpenAPI documentation is available at `http://127.0.0.1:8000/docs`.
+Interactive documentation is available at `http://127.0.0.1:8000/docs`.
 
-### Health
-
-```bash
-curl http://127.0.0.1:8000/health
-```
-
-### Analyze and persist an incident
+Create and asynchronously dispatch an incident:
 
 ```bash
 curl -X POST http://127.0.0.1:8000/api/v1/incidents \
@@ -106,142 +178,127 @@ curl -X POST http://127.0.0.1:8000/api/v1/incidents \
   }'
 ```
 
-The Phase 1 response contract is preserved:
-
-```json
-{
-  "classification": "authentication_error",
-  "severity": "high",
-  "probable_cause": "The request could not be authenticated because its credentials or token were missing, invalid, expired, or failed verification.",
-  "recommended_actions": [
-    "Verify that the client sends a valid bearer token.",
-    "Check token expiry, issuer, audience, and signing-key configuration.",
-    "Review authentication service logs for rejected credentials."
-  ]
-}
-```
-
-`severity` is optional. `service`, `error`, and `log` are required non-empty
-strings. Maximum lengths are 100, 1,000, and 20,000 characters respectively.
-Unknown request fields are rejected.
-
-### List incidents
+List or retrieve persisted incidents:
 
 ```bash
-curl "http://127.0.0.1:8000/api/v1/incidents?service=identity-api&severity=high&classification=authentication_error&limit=50&offset=0"
-```
-
-All filters are optional. `severity` filters the resolved severity. Results are
-ordered newest first; `limit` is between 1 and 100 and defaults to 50. The
-response contains the stored input, requested and resolved severity, full
-analysis, ID, and creation timestamp.
-
-### Retrieve one incident
-
-```bash
+curl "http://127.0.0.1:8000/api/v1/incidents?service=identity-api&severity=high"
 curl http://127.0.0.1:8000/api/v1/incidents/1
 ```
 
-An unknown ID returns `404 Not Found` with `{"detail":"Incident not found"}`.
+Exact filters support `service`, resolved `severity`, and `classification`.
+Results are newest first and accept `limit` and `offset`.
 
-## Docker Compose setup
+## Docker Compose
 
-Prerequisites: Docker Desktop or Docker Engine with Compose, plus the ability to
-run the `postgres:17` image.
-
-Create local settings from the example and replace `change-me` with a private
-password:
+Prerequisites are Docker Desktop or Docker Engine with Compose. Create local
+settings and replace the example PostgreSQL password:
 
 ```powershell
 Copy-Item .env.example .env
 ```
 
-On macOS or Linux:
+Start the complete stack:
 
 ```bash
-cp .env.example .env
-```
-
-Start the stack and build the API image:
-
-```bash
-docker compose up --build -d
+docker compose config
+docker compose up -d --build
 docker compose ps
-docker compose logs -f api
+docker compose logs -f api worker kafka
 ```
 
-The stack contains:
+Services:
 
-- `db`: PostgreSQL 17, `pg_isready` health check, and the named
-  `postgres_data` volume.
-- `api`: non-root FastAPI container, HTTP health check, structured JSON logs,
-  and health-aware dependency on `db`. It runs `alembic upgrade head` before
-  starting Uvicorn.
+- `db`: PostgreSQL 17 with the existing `postgres_data` volume and readiness
+  check.
+- `kafka`: official `apache/kafka:4.3.1`, single-node combined KRaft
+  broker/controller, internal listener, CLI readiness check, and `kafka_data`
+  volume.
+- `api`: non-root FastAPI service. It requires PostgreSQL, runs Alembic, and can
+  preserve pending events if Kafka is temporarily unavailable.
+- `worker`: separate consumer process. It starts after PostgreSQL, Kafka, and the
+  migrated API are healthy.
 
-Stop containers without deleting stored incidents:
+Stop containers without deleting database or Kafka volumes:
 
 ```bash
 docker compose down
 ```
 
-Deleting the named volume also deletes the PostgreSQL data and is intentionally
-not part of the normal shutdown command.
+## Kafka troubleshooting
 
-## Run locally with Python
-
-Prerequisite: Python 3.11 or newer and a reachable PostgreSQL database.
-
-Create and activate a virtual environment, then install dependencies:
-
-```powershell
-python -m venv .venv
-.\.venv\Scripts\Activate.ps1
-python -m pip install -r requirements-dev.txt
-Copy-Item .env.example .env
-```
-
-Set `DATABASE_URL` in `.env` for the database reachable from the host, apply the
-schema, and start the API:
-
-```powershell
-alembic upgrade head
-uvicorn app.main:app --reload
-```
-
-Equivalent migration commands:
+List and describe the event topic:
 
 ```bash
-alembic current
-alembic history
-alembic upgrade head
-alembic downgrade -1
-alembic revision --autogenerate -m "describe schema change"
+docker compose exec kafka /opt/kafka/bin/kafka-topics.sh \
+  --bootstrap-server kafka:9092 --list
+docker compose exec kafka /opt/kafka/bin/kafka-topics.sh \
+  --bootstrap-server kafka:9092 --describe --topic incident.created
 ```
 
-`DATABASE_URL` is required and accepts a SQLAlchemy URL. PostgreSQL uses the
-`postgresql+psycopg://` driver. `LOG_LEVEL` defaults to `INFO`. Credentials are
-supplied only through local environment settings and are not embedded in code or
-Compose configuration.
+Inspect events from the start without joining the worker group:
+
+```bash
+docker compose exec kafka /opt/kafka/bin/kafka-console-consumer.sh \
+  --bootstrap-server kafka:9092 --topic incident.created \
+  --from-beginning --max-messages 10
+```
+
+Inspect worker offsets and lag:
+
+```bash
+docker compose exec kafka /opt/kafka/bin/kafka-consumer-groups.sh \
+  --bootstrap-server kafka:9092 --describe \
+  --group incident-processing-v1
+```
+
+Inspect durable publication and idempotency state:
+
+```bash
+docker compose exec db sh -c \
+  'psql -U "$POSTGRES_USER" -d "$POSTGRES_DB" -c \
+  "SELECT event_id, attempts, published_at, last_error FROM outbox_events;"'
+docker compose exec db sh -c \
+  'psql -U "$POSTGRES_USER" -d "$POSTGRES_DB" -c \
+  "SELECT event_id, incident_id, processing_result FROM processed_events;"'
+```
+
+## Configuration
+
+`.env.example` documents all runtime settings. Important Kafka variables are:
+
+- `KAFKA_BOOTSTRAP_SERVERS`
+- `KAFKA_INCIDENT_CREATED_TOPIC`
+- `KAFKA_TOPIC_PARTITIONS`
+- `KAFKA_CONSUMER_GROUP`
+- `KAFKA_PRODUCER_CLIENT_ID`, `KAFKA_PRODUCER_ACKS`,
+  `KAFKA_PRODUCER_ENABLE_IDEMPOTENCE`, delivery timeout, and retries
+- outbox polling/batch settings
+- worker client, polling, and retry settings
+
+The local `.env` is ignored by Git. Kafka uses plaintext only inside the local
+Compose network; production deployments would require authentication,
+encryption, and a multi-broker topology.
 
 ## Quality checks
 
-Tests use a fresh in-memory SQLite database for each test through FastAPI's
-database dependency override. This keeps unit/API tests fast and deterministic
-without depending on a developer's PostgreSQL container; the production mapping
-and migration target PostgreSQL.
+The normal suite does not require Kafka. It uses isolated SQLite databases,
+dependency injection, and fake producer/handler adapters for deterministic tests.
 
 ```bash
 python -m pytest
 ruff check app tests migrations
+ruff format --check app tests migrations
 python -m compileall -q app tests migrations
 pip-audit -r requirements.txt
+docker compose config --quiet
 ```
 
 ## Roadmap
 
-- **Phase 1 — complete:** FastAPI foundation and deterministic incident analysis.
-- **Phase 2 — implemented:** PostgreSQL persistence, SQLAlchemy/Alembic,
-  retrieval APIs, Docker support, structured logging, and persistence tests.
-- **Later phases:** asynchronous event processing, LLM-assisted analysis and
-  retrieval, platform deployment, CI/CD, and observability. These are explicitly
-  outside the current implementation.
+- **Phase 1 — complete:** FastAPI and deterministic incident analysis.
+- **Phase 2 — complete:** PostgreSQL, SQLAlchemy/Alembic, retrieval APIs, Docker,
+  and structured logging.
+- **Phase 3 — implemented:** Kafka KRaft infrastructure, transactional outbox,
+  asynchronous worker, manual offsets, and PostgreSQL idempotency.
+- **Later phases:** AI-assisted processing and broader platform deployment and
+  operations capabilities. These are not implemented here.

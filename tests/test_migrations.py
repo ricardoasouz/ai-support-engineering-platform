@@ -25,7 +25,12 @@ def test_initial_migration_creates_incident_schema(tmp_path: Path) -> None:
         engine = create_engine(database_url)
         inspector = inspect(engine)
 
-        assert set(inspector.get_table_names()) == {"alembic_version", "incidents"}
+        assert set(inspector.get_table_names()) == {
+            "alembic_version",
+            "incidents",
+            "outbox_events",
+            "processed_events",
+        }
         assert {column["name"] for column in inspector.get_columns("incidents")} == {
             "id",
             "service",
@@ -43,10 +48,35 @@ def test_initial_migration_creates_incident_schema(tmp_path: Path) -> None:
             "ix_incidents_resolved_severity",
             "ix_incidents_service",
         }
+        assert {
+            column["name"] for column in inspector.get_columns("outbox_events")
+        } == {
+            "event_id",
+            "incident_id",
+            "event_type",
+            "topic",
+            "payload",
+            "attempts",
+            "next_attempt_at",
+            "last_error",
+            "published_at",
+            "created_at",
+        }
+        assert {
+            column["name"] for column in inspector.get_columns("processed_events")
+        } == {
+            "event_id",
+            "event_type",
+            "event_version",
+            "incident_id",
+            "consumer_group",
+            "processing_result",
+            "processed_at",
+        }
         with engine.connect() as connection:
             assert connection.scalar(
                 text("SELECT version_num FROM alembic_version")
-            ) == ("20260803_0001")
+            ) == ("20260803_0002")
         engine.dispose()
     finally:
         environ["DATABASE_URL"] = previous_database_url
