@@ -81,8 +81,8 @@ def test_kafka_headless_service_provides_non_readiness_gated_pod_dns() -> None:
     assert headless_path.is_file()
     headless = headless_path.read_text(encoding="utf-8")
     assert "clusterIP: None" in headless
-    assert 'name: kafka' in headless
-    assert 'name: controller' in headless
+    assert "name: kafka" in headless
+    assert "name: controller" in headless
     assert "{{ .Values.kafka.port }}" in headless
     assert "{{ .Values.kafka.controllerPort }}" in headless
     assert "type: LoadBalancer" not in headless
@@ -95,16 +95,18 @@ def test_kafka_headless_service_provides_non_readiness_gated_pod_dns() -> None:
     assert "publishNotReadyAddresses: true" in headless
 
 
-def test_kafka_controller_quorum_bootstraps_via_stable_pod_dns_not_client_service() -> None:
-    statefulset = (
-        CHART / "templates" / "kafka-statefulset.yaml"
-    ).read_text(encoding="utf-8")
+def test_kafka_controller_quorum_bootstraps_via_stable_pod_dns_not_client_service() -> (
+    None
+):
+    statefulset = (CHART / "templates" / "kafka-statefulset.yaml").read_text(
+        encoding="utf-8"
+    )
     assert (
         'serviceName: {{ include "ai-support-platform.fullname" . }}-kafka-headless'
         in statefulset
     )
     assert (
-        '{name: KAFKA_CONTROLLER_QUORUM_VOTERS, value: '
+        "{name: KAFKA_CONTROLLER_QUORUM_VOTERS, value: "
         '"1@{{ include "ai-support-platform.fullname" . }}-kafka-0.'
         '{{ include "ai-support-platform.fullname" . }}-kafka-headless:'
         '{{ .Values.kafka.controllerPort }}"}'
@@ -120,9 +122,9 @@ def test_kafka_controller_quorum_bootstraps_via_stable_pod_dns_not_client_servic
 
 
 def test_kafka_client_service_stays_clusterip_without_controller_port() -> None:
-    client_service = (
-        CHART / "templates" / "kafka-service.yaml"
-    ).read_text(encoding="utf-8")
+    client_service = (CHART / "templates" / "kafka-service.yaml").read_text(
+        encoding="utf-8"
+    )
     assert "type: ClusterIP" in client_service
     assert "name: kafka" in client_service
     assert "{{ .Values.kafka.port }}" in client_service
@@ -135,11 +137,11 @@ def test_kafka_client_service_stays_clusterip_without_controller_port() -> None:
 
 
 def test_kafka_advertises_client_listener_via_stable_pod_dns() -> None:
-    statefulset = (
-        CHART / "templates" / "kafka-statefulset.yaml"
-    ).read_text(encoding="utf-8")
+    statefulset = (CHART / "templates" / "kafka-statefulset.yaml").read_text(
+        encoding="utf-8"
+    )
     assert (
-        '{name: KAFKA_ADVERTISED_LISTENERS, value: '
+        "{name: KAFKA_ADVERTISED_LISTENERS, value: "
         '"PLAINTEXT://{{ include "ai-support-platform.fullname" . }}-kafka-0.'
         '{{ include "ai-support-platform.fullname" . }}-kafka-headless:'
         '{{ .Values.kafka.port }}"}'
@@ -156,9 +158,7 @@ def test_kafka_advertises_client_listener_via_stable_pod_dns() -> None:
 
 
 def test_application_kafka_bootstrap_still_uses_normal_clusterip_service() -> None:
-    configmap = (
-        CHART / "templates" / "configmap.yaml"
-    ).read_text(encoding="utf-8")
+    configmap = (CHART / "templates" / "configmap.yaml").read_text(encoding="utf-8")
     assert (
         'KAFKA_BOOTSTRAP_SERVERS: {{ ternary (printf "%s-kafka:%v" '
         '(include "ai-support-platform.fullname" .) .Values.kafka.port)'
@@ -171,16 +171,19 @@ def test_application_kafka_bootstrap_still_uses_normal_clusterip_service() -> No
 
 
 def test_kafka_probes_still_exercise_real_broker_protocol() -> None:
-    statefulset = (
-        CHART / "templates" / "kafka-statefulset.yaml"
-    ).read_text(encoding="utf-8")
+    statefulset = (CHART / "templates" / "kafka-statefulset.yaml").read_text(
+        encoding="utf-8"
+    )
     # startupProbe and readinessProbe must keep using the real
     # kafka-topics.sh admin-client round trip (not a bare TCP socket check)
     # so a Ready pod is verified to actually serve broker metadata, not just
     # accept a TCP connection.
-    assert statefulset.count(
-        '["/opt/kafka/bin/kafka-topics.sh", "--bootstrap-server", '
-        '"localhost:{{ .Values.kafka.port }}", "--list"]'
-    ) == 2
-    assert 'startupProbe' in statefulset
-    assert 'readinessProbe' in statefulset
+    assert (
+        statefulset.count(
+            '["/opt/kafka/bin/kafka-topics.sh", "--bootstrap-server", '
+            '"localhost:{{ .Values.kafka.port }}", "--list"]'
+        )
+        == 2
+    )
+    assert "startupProbe" in statefulset
+    assert "readinessProbe" in statefulset
