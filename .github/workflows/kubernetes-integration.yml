@@ -116,21 +116,41 @@ jobs:
           test "$persisted_count" -eq "$incident_count"
           kubectl -n "$NAMESPACE" exec "statefulset/${RELEASE_NAME}-kafka" -- /opt/kafka/bin/kafka-topics.sh --bootstrap-server localhost:9092 --describe --topic incident.created
       - name: Validate stateless scaling
+        shell: bash
         run: |
-          kubectl -n "$NAMESPACE" scale "deployment/${RELEASE_NAME}-api" --replicas=2
-          kubectl -n "$NAMESPACE" scale "deployment/${RELEASE_NAME}-worker" --replicas=2
+          # Scale via a Helm-managed upgrade (revision 2), not "kubectl scale",
+          # so Helm keeps sole field ownership of .spec.replicas -- an
+          # imperative "kubectl scale" here makes kubectl the Server-Side
+          # Apply owner of that field, which then makes the next "helm
+          # upgrade" fail with a field-conflict error.
+          helm upgrade "$RELEASE_NAME" deploy/helm/ai-support-platform \
+            --namespace "$NAMESPACE" --reuse-values \
+            --set api.replicaCount=2 --set worker.replicaCount=2 \
+            --wait --wait-for-jobs --timeout 15m
           kubectl -n "$NAMESPACE" rollout status "deployment/${RELEASE_NAME}-api" --timeout=300s
           kubectl -n "$NAMESPACE" rollout status "deployment/${RELEASE_NAME}-worker" --timeout=300s
-          test "$(kubectl -n "$NAMESPACE" get pods -l app.kubernetes.io/component=api --field-selector=status.phase=Running --no-headers | wc -l)" -eq 2
-          test "$(kubectl -n "$NAMESPACE" get pods -l app.kubernetes.io/component=worker --field-selector=status.phase=Running --no-headers | wc -l)" -eq 2
+          test "$(kubectl -n "$NAMESPACE" get deployment "${RELEASE_NAME}-api" -o jsonpath='{.status.readyReplicas}')" -eq 2
+          test "$(kubectl -n "$NAMESPACE" get deployment "${RELEASE_NAME}-worker" -o jsonpath='{.status.readyReplicas}')" -eq 2
+          kubectl -n "$NAMESPACE" port-forward "service/${RELEASE_NAME}-api" 18081:8000 > /tmp/port-forward-scale.log 2>&1 &
+          scale_pf_pid=$!
+          for _ in {1..30}; do curl -fsS http://127.0.0.1:18081/health && break; sleep 1; done
+          kill "$scale_pf_pid" 2>/dev/null || true
       - name: Validate Helm rollout and rollback
         shell: bash
         run: |
+          # Revision 1 = initial install, revision 2 = the Helm-managed scale
+          # above, revision 3 = this annotation-only upgrade. Roll back to
+          # revision 2 (the known-good state *after* scaling), not revision
+          # 1, so this asserts real "undo the last deploy" semantics and
+          # confirms the 2-replica state survives a rollback rather than
+          # trivially resetting to the original pre-scaling install.
           helm upgrade "$RELEASE_NAME" deploy/helm/ai-support-platform --namespace "$NAMESPACE" --reuse-values --set-string global.podAnnotations.phase8-rollout="$GITHUB_RUN_ID" --wait --wait-for-jobs --timeout 15m
           helm history "$RELEASE_NAME" --namespace "$NAMESPACE"
-          helm rollback "$RELEASE_NAME" 1 --namespace "$NAMESPACE" --wait --wait-for-jobs --timeout 10m
+          helm rollback "$RELEASE_NAME" 2 --namespace "$NAMESPACE" --wait --wait-for-jobs --timeout 10m
           kubectl -n "$NAMESPACE" rollout status "deployment/${RELEASE_NAME}-api" --timeout=300s
           kubectl -n "$NAMESPACE" rollout status "deployment/${RELEASE_NAME}-worker" --timeout=300s
+          test "$(kubectl -n "$NAMESPACE" get deployment "${RELEASE_NAME}-api" -o jsonpath='{.status.readyReplicas}')" -eq 2
+          test "$(kubectl -n "$NAMESPACE" get deployment "${RELEASE_NAME}-worker" -o jsonpath='{.status.readyReplicas}')" -eq 2
       - name: Capture failure diagnostics
         if: failure()
         run: |
