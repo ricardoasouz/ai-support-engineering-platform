@@ -42,7 +42,18 @@ spec:
             - {name: KAFKA_PROCESS_ROLES, value: "broker,controller"}
             - {name: KAFKA_LISTENER_SECURITY_PROTOCOL_MAP, value: "CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT"}
             - {name: KAFKA_LISTENERS, value: "PLAINTEXT://:{{ .Values.kafka.port }},CONTROLLER://:{{ .Values.kafka.controllerPort }}"}
-            - {name: KAFKA_ADVERTISED_LISTENERS, value: "PLAINTEXT://{{ include "ai-support-platform.fullname" . }}-kafka:{{ .Values.kafka.port }}"}
+            # Single-node KRaft broker (fixed at replicas: 1, KAFKA_NODE_ID=1):
+            # this chart is an intentionally non-HA local/demo Kafka topology,
+            # not a multi-broker cluster. Advertising the stable per-pod
+            # headless DNS name (rather than the readiness-gated ClusterIP
+            # Service) lets Kafka clients and the pod's own probes reconnect
+            # to the broker after metadata discovery without depending on
+            # this pod's own Service endpoint being marked Ready -- the same
+            # deadlock class already solved for controller quorum traffic
+            # below. Application bootstrap still targets the normal
+            # ClusterIP Service (see configmap.yaml KAFKA_BOOTSTRAP_SERVERS);
+            # only the *advertised* redirect address changes.
+            - {name: KAFKA_ADVERTISED_LISTENERS, value: "PLAINTEXT://{{ include "ai-support-platform.fullname" . }}-kafka-0.{{ include "ai-support-platform.fullname" . }}-kafka-headless:{{ .Values.kafka.port }}"}
             - {name: KAFKA_INTER_BROKER_LISTENER_NAME, value: "PLAINTEXT"}
             - {name: KAFKA_CONTROLLER_LISTENER_NAMES, value: "CONTROLLER"}
             - {name: KAFKA_CONTROLLER_QUORUM_VOTERS, value: "1@{{ include "ai-support-platform.fullname" . }}-kafka-0.{{ include "ai-support-platform.fullname" . }}-kafka-headless:{{ .Values.kafka.controllerPort }}"}
