@@ -1,0 +1,135 @@
+{{- if .Values.kafka.enabled }}
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: {{ include "ai-support-platform.fullname" . }}-kafka
+  labels:
+    {{- include "ai-support-platform.labels" . | nindent 4 }}
+    app.kubernetes.io/component: kafka
+spec:
+  serviceName: {{ include "ai-support-platform.fullname" . }}-kafka-headless
+  replicas: 1
+  selector:
+    matchLabels:
+      {{- include "ai-support-platform.componentLabels" (dict "root" . "component" "kafka") | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "ai-support-platform.componentLabels" (dict "root" . "component" "kafka") | nindent 8 }}
+    spec:
+      serviceAccountName: {{ include "ai-support-platform.platformServiceAccountName" . }}
+      automountServiceAccountToken: false
+      terminationGracePeriodSeconds: 60
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        runAsGroup: 1000
+        fsGroup: 1000
+        fsGroupChangePolicy: OnRootMismatch
+        seccompProfile:
+          type: {{ .Values.podSecurity.seccompProfile }}
+      containers:
+        - name: kafka
+          image: "{{ .Values.kafka.image.repository }}:{{ .Values.kafka.image.tag }}"
+          imagePullPolicy: {{ .Values.kafka.image.pullPolicy }}
+          ports:
+            - name: kafka
+              containerPort: {{ .Values.kafka.port }}
+            - name: controller
+              containerPort: {{ .Values.kafka.controllerPort }}
+          env:
+            - {name: KAFKA_NODE_ID, value: "1"}
+            - {name: KAFKA_PROCESS_ROLES, value: "broker,controller"}
+            - {name: KAFKA_LISTENER_SECURITY_PROTOCOL_MAP, value: "CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT"}
+            - {name: KAFKA_LISTENERS, value: "PLAINTEXT://:{{ .Values.kafka.port }},CONTROLLER://:{{ .Values.kafka.controllerPort }}"}
+            # Single-node KRaft broker (fixed at replicas: 1, KAFKA_NODE_ID=1):
+            # this chart is an intentionally non-HA local/demo Kafka topology,
+            # not a multi-broker cluster. Advertising the stable per-pod
+            # headless DNS name (rather than the readiness-gated ClusterIP
+            # Service) lets Kafka clients and the pod's own probes reconnect
+            # to the broker after metadata discovery without depending on
+            # this pod's own Service endpoint being marked Ready -- the same
+            # deadlock class already solved for controller quorum traffic
+            # below. Application bootstrap still targets the normal
+            # ClusterIP Service (see configmap.yaml KAFKA_BOOTSTRAP_SERVERS);
+            # only the *advertised* redirect address changes.
+            - {name: KAFKA_ADVERTISED_LISTENERS, value: "PLAINTEXT://{{ include "ai-support-platform.fullname" . }}-kafka-0.{{ include "ai-support-platform.fullname" . }}-kafka-headless:{{ .Values.kafka.port }}"}
+            - {name: KAFKA_INTER_BROKER_LISTENER_NAME, value: "PLAINTEXT"}
+            - {name: KAFKA_CONTROLLER_LISTENER_NAMES, value: "CONTROLLER"}
+            - {name: KAFKA_CONTROLLER_QUORUM_VOTERS, value: "1@{{ include "ai-support-platform.fullname" . }}-kafka-0.{{ include "ai-support-platform.fullname" . }}-kafka-headless:{{ .Values.kafka.controllerPort }}"}
+            - {name: KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR, value: "1"}
+            - {name: KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR, value: "1"}
+            - {name: KAFKA_TRANSACTION_STATE_LOG_MIN_ISR, value: "1"}
+            - {name: KAFKA_SHARE_COORDINATOR_STATE_TOPIC_REPLICATION_FACTOR, value: "1"}
+            - {name: KAFKA_SHARE_COORDINATOR_STATE_TOPIC_MIN_ISR, value: "1"}
+            - {name: KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS, value: "0"}
+            - {name: KAFKA_DEFAULT_REPLICATION_FACTOR, value: "1"}
+            - {name: KAFKA_NUM_PARTITIONS, value: {{ .Values.config.kafka.topicPartitions | quote }}}
+            - {name: KAFKA_AUTO_CREATE_TOPICS_ENABLE, value: "true"}
+            - {name: KAFKA_LOG_DIRS, value: "/var/lib/kafka/data"}
+            - {name: CLUSTER_ID, value: {{ .Values.kafka.clusterId | quote }}}
+          startupProbe:
+            exec:
+              command: ["/opt/kafka/bin/kafka-topics.sh", "--bootstrap-server", "localhost:{{ .Values.kafka.port }}", "--list"]
+            failureThreshold: 60
+            periodSeconds: 5
+            timeoutSeconds: 10
+          readinessProbe:
+            exec:
+              command: ["/opt/kafka/bin/kafka-topics.sh", "--bootstrap-server", "localhost:{{ .Values.kafka.port }}", "--list"]
+            periodSeconds: 10
+            timeoutSeconds: 10
+            failureThreshold: 6
+          livenessProbe:
+            tcpSocket:
+              port: kafka
+            periodSeconds: 15
+            timeoutSeconds: 3
+            failureThreshold: 4
+          resources:
+            {{- toYaml .Values.kafka.resources | nindent 12 }}
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          volumeMounts:
+            - name: data
+              mountPath: /var/lib/kafka/data
+            - name: tmp
+              mountPath: /tmp
+            - name: kafka-config
+              mountPath: /opt/kafka/config
+            - name: kafka-logs
+              mountPath: /opt/kafka/logs
+      volumes:
+        - name: tmp
+          emptyDir:
+            sizeLimit: 128Mi
+        - name: kafka-config
+          emptyDir:
+            sizeLimit: 16Mi
+        - name: kafka-logs
+          emptyDir:
+            sizeLimit: 256Mi
+        {{- if not .Values.kafka.persistence.enabled }}
+        - name: data
+          emptyDir: {}
+        {{- end }}
+  {{- if .Values.kafka.persistence.enabled }}
+  volumeClaimTemplates:
+    - metadata:
+        name: data
+        labels:
+          {{- include "ai-support-platform.labels" . | nindent 10 }}
+          app.kubernetes.io/component: kafka
+      spec:
+        accessModes: ["ReadWriteOnce"]
+        {{- with .Values.kafka.persistence.storageClass }}
+        storageClassName: {{ . | quote }}
+        {{- end }}
+        resources:
+          requests:
+            storage: {{ .Values.kafka.persistence.size }}
+  {{- end }}
+{{- end }}

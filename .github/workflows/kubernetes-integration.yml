@@ -1,0 +1,165 @@
+name: Manual Kind integration
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: kubernetes-kind-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  HELM_VERSION: 4.2.0
+  KIND_VERSION: 0.31.0
+  KIND_NODE_IMAGE: kindest/node:v1.35.0@sha256:452d707d4862f52530247495d180205e029056831160e22870e37e3f6c1ac31f
+  CLUSTER_NAME: ai-support-phase8-ci
+  NAMESPACE: ai-support-phase8-ci
+  RELEASE_NAME: ai-support
+
+jobs:
+  kind-integration:
+    name: Kind incident flow and recovery
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Set up Python
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.14"
+      - name: Install hash-locked test dependencies
+        run: python -m pip install --require-hashes --requirement requirements-dev.lock
+      - name: Install checksum-verified Helm and Kind
+        shell: bash
+        run: |
+          helm_archive="helm-v${HELM_VERSION}-linux-amd64.tar.gz"
+          curl -fsSL "https://get.helm.sh/${helm_archive}" -o "/tmp/${helm_archive}"
+          curl -fsSL "https://get.helm.sh/${helm_archive}.sha256sum" -o "/tmp/${helm_archive}.sha256sum"
+          (cd /tmp && sha256sum --check "${helm_archive}.sha256sum")
+          tar -xzf "/tmp/${helm_archive}" -C /tmp
+          sudo install -m 0755 /tmp/linux-amd64/helm /usr/local/bin/helm
+          curl -fsSL "https://kind.sigs.k8s.io/dl/v${KIND_VERSION}/kind-linux-amd64" -o /tmp/kind
+          curl -fsSL "https://kind.sigs.k8s.io/dl/v${KIND_VERSION}/kind-linux-amd64.sha256sum" -o /tmp/kind.sha256sum
+          echo "$(awk '{print $1}' /tmp/kind.sha256sum)  /tmp/kind" | sha256sum --check -
+          sudo install -m 0755 /tmp/kind /usr/local/bin/kind
+      - name: Create isolated Kind cluster
+        run: kind create cluster --name "$CLUSTER_NAME" --image "$KIND_NODE_IMAGE" --config deploy/kind/cluster.yaml --wait 180s
+      - name: Build and load application images
+        shell: bash
+        run: |
+          app_version="$(tr -d '\r\n' < VERSION)"
+          build_time="$(git show -s --format=%cI HEAD)"
+          docker build --build-arg APP_VERSION="$app_version" --build-arg GIT_SHA="$GITHUB_SHA" --build-arg BUILD_TIME="$build_time" -t ai-support-platform-api:ci .
+          docker tag ai-support-platform-api:ci ai-support-platform-worker:ci
+          kind load docker-image --name "$CLUSTER_NAME" ai-support-platform-api:ci ai-support-platform-worker:ci
+      - name: Create ephemeral Kubernetes Secret
+        shell: bash
+        run: |
+          password="$(openssl rand -hex 24)"
+          echo "::add-mask::$password"
+          kubectl create namespace "$NAMESPACE"
+          kubectl label namespace "$NAMESPACE" pod-security.kubernetes.io/enforce=restricted pod-security.kubernetes.io/audit=restricted pod-security.kubernetes.io/warn=restricted --overwrite
+          kubectl -n "$NAMESPACE" create secret generic ai-support-platform-secrets \
+            --from-literal="database-url=postgresql+psycopg://support_user:${password}@${RELEASE_NAME}-postgres:5432/support_platform" \
+            --from-literal="postgres-password=${password}" \
+            --from-literal="grafana-admin-password=${password}"
+      - name: Install the reduced CI chart
+        run: >-
+          helm upgrade --install "$RELEASE_NAME" deploy/helm/ai-support-platform
+          --namespace "$NAMESPACE"
+          --values deploy/helm/ai-support-platform/values-ci.yaml
+          --set-string fullnameOverride="$RELEASE_NAME"
+          --set-string image.tag=ci
+          --wait --wait-for-jobs --timeout 15m
+      - name: Verify workloads, storage, and migration
+        run: |
+          kubectl get pods,pvc -n "$NAMESPACE"
+          kubectl wait -n "$NAMESPACE" --for=condition=Available "deployment/${RELEASE_NAME}-api" "deployment/${RELEASE_NAME}-worker" --timeout=300s
+          kubectl -n "$NAMESPACE" exec "statefulset/${RELEASE_NAME}-postgres" -- psql -U support_user -d support_platform -tAc 'select version_num from alembic_version'
+      - name: Run incident-to-review smoke test
+        shell: bash
+        run: |
+          kubectl -n "$NAMESPACE" port-forward "service/${RELEASE_NAME}-api" 18080:8000 > /tmp/port-forward.log 2>&1 &
+          echo $! > /tmp/port-forward.pid
+          for _ in {1..30}; do curl -fsS http://127.0.0.1:18080/health && break; sleep 1; done
+          RUN_INTEGRATION_TESTS=1 INTEGRATION_BASE_URL=http://127.0.0.1:18080 python -m pytest -m "integration and e2e" integration_tests -q
+      - name: Validate API and worker pod recovery
+        shell: bash
+        run: |
+          api_pod="$(kubectl -n "$NAMESPACE" get pod -l app.kubernetes.io/component=api -o jsonpath='{.items[0].metadata.name}')"
+          worker_pod="$(kubectl -n "$NAMESPACE" get pod -l app.kubernetes.io/component=worker -o jsonpath='{.items[0].metadata.name}')"
+          kubectl -n "$NAMESPACE" delete pod "$api_pod" "$worker_pod" --wait=false
+          kubectl -n "$NAMESPACE" rollout status "deployment/${RELEASE_NAME}-api" --timeout=300s
+          kubectl -n "$NAMESPACE" rollout status "deployment/${RELEASE_NAME}-worker" --timeout=300s
+      - name: Validate stateful restart persistence
+        shell: bash
+        run: |
+          incident_count="$(kubectl -n "$NAMESPACE" exec "statefulset/${RELEASE_NAME}-postgres" -- psql -U support_user -d support_platform -tAc 'select count(*) from incidents')"
+          test "$incident_count" -gt 0
+          kubectl -n "$NAMESPACE" delete pod "${RELEASE_NAME}-postgres-0" "${RELEASE_NAME}-kafka-0" --wait=false
+          kubectl -n "$NAMESPACE" rollout status "statefulset/${RELEASE_NAME}-postgres" --timeout=300s
+          kubectl -n "$NAMESPACE" rollout status "statefulset/${RELEASE_NAME}-kafka" --timeout=300s
+          persisted_count="$(kubectl -n "$NAMESPACE" exec "statefulset/${RELEASE_NAME}-postgres" -- psql -U support_user -d support_platform -tAc 'select count(*) from incidents')"
+          test "$persisted_count" -eq "$incident_count"
+          kubectl -n "$NAMESPACE" exec "statefulset/${RELEASE_NAME}-kafka" -- /opt/kafka/bin/kafka-topics.sh --bootstrap-server localhost:9092 --describe --topic incident.created
+      - name: Validate stateless scaling
+        shell: bash
+        run: |
+          # Scale via a Helm-managed upgrade (revision 2), not "kubectl scale",
+          # so Helm keeps sole field ownership of .spec.replicas -- an
+          # imperative "kubectl scale" here makes kubectl the Server-Side
+          # Apply owner of that field, which then makes the next "helm
+          # upgrade" fail with a field-conflict error.
+          helm upgrade "$RELEASE_NAME" deploy/helm/ai-support-platform \
+            --namespace "$NAMESPACE" --reuse-values \
+            --set api.replicaCount=2 --set worker.replicaCount=2 \
+            --wait --wait-for-jobs --timeout 15m
+          kubectl -n "$NAMESPACE" rollout status "deployment/${RELEASE_NAME}-api" --timeout=300s
+          kubectl -n "$NAMESPACE" rollout status "deployment/${RELEASE_NAME}-worker" --timeout=300s
+          test "$(kubectl -n "$NAMESPACE" get deployment "${RELEASE_NAME}-api" -o jsonpath='{.status.readyReplicas}')" -eq 2
+          test "$(kubectl -n "$NAMESPACE" get deployment "${RELEASE_NAME}-worker" -o jsonpath='{.status.readyReplicas}')" -eq 2
+          kubectl -n "$NAMESPACE" port-forward "service/${RELEASE_NAME}-api" 18081:8000 > /tmp/port-forward-scale.log 2>&1 &
+          scale_pf_pid=$!
+          for _ in {1..30}; do curl -fsS http://127.0.0.1:18081/health && break; sleep 1; done
+          kill "$scale_pf_pid" 2>/dev/null || true
+      - name: Validate Helm rollout and rollback
+        shell: bash
+        run: |
+          # Revision 1 = initial install, revision 2 = the Helm-managed scale
+          # above, revision 3 = this annotation-only upgrade. Roll back to
+          # revision 2 (the known-good state *after* scaling), not revision
+          # 1, so this asserts real "undo the last deploy" semantics and
+          # confirms the 2-replica state survives a rollback rather than
+          # trivially resetting to the original pre-scaling install.
+          helm upgrade "$RELEASE_NAME" deploy/helm/ai-support-platform --namespace "$NAMESPACE" --reuse-values --set-string global.podAnnotations.phase8-rollout="$GITHUB_RUN_ID" --wait --wait-for-jobs --timeout 15m
+          helm history "$RELEASE_NAME" --namespace "$NAMESPACE"
+          helm rollback "$RELEASE_NAME" 2 --namespace "$NAMESPACE" --wait --wait-for-jobs --timeout 10m
+          kubectl -n "$NAMESPACE" rollout status "deployment/${RELEASE_NAME}-api" --timeout=300s
+          kubectl -n "$NAMESPACE" rollout status "deployment/${RELEASE_NAME}-worker" --timeout=300s
+          test "$(kubectl -n "$NAMESPACE" get deployment "${RELEASE_NAME}-api" -o jsonpath='{.status.readyReplicas}')" -eq 2
+          test "$(kubectl -n "$NAMESPACE" get deployment "${RELEASE_NAME}-worker" -o jsonpath='{.status.readyReplicas}')" -eq 2
+      - name: Capture failure diagnostics
+        if: failure()
+        run: |
+          mkdir -p ci-artifacts/kubernetes-integration
+          kubectl get all,pvc,jobs -n "$NAMESPACE" -o wide > ci-artifacts/kubernetes-integration/resources.txt || true
+          kubectl get events -n "$NAMESPACE" --sort-by=.lastTimestamp > ci-artifacts/kubernetes-integration/events.txt || true
+          kubectl logs -n "$NAMESPACE" -l app.kubernetes.io/component=api --all-containers --tail=300 > ci-artifacts/kubernetes-integration/api.log || true
+          kubectl logs -n "$NAMESPACE" -l app.kubernetes.io/component=worker --all-containers --tail=300 > ci-artifacts/kubernetes-integration/worker.log || true
+          kubectl logs -n "$NAMESPACE" -l app.kubernetes.io/component=kafka --all-containers --tail=300 > ci-artifacts/kubernetes-integration/kafka.log || true
+      - name: Upload failure diagnostics
+        if: failure()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: kubernetes-integration-diagnostics-${{ github.sha }}
+          path: ci-artifacts/kubernetes-integration/
+          if-no-files-found: warn
+          retention-days: 7
+      - name: Delete isolated Kind cluster
+        if: always()
+        run: kind delete cluster --name "$CLUSTER_NAME"

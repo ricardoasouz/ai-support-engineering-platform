@@ -1,0 +1,28 @@
+# Production-like topology: application workloads use separately managed services.
+global:
+  appEnvironment: production-like
+
+postgres:
+  enabled: false
+
+kafka:
+  enabled: false
+  externalBootstrapServers: kafka.example.internal:9092
+
+ollama:
+  enabled: false
+  externalBaseUrl: http://ollama.example.internal:11434
+  modelInit:
+    enabled: false
+
+observability:
+  enabled: false
+
+config:
+  telemetry:
+    tracesExporter: none
+    metricsExporter: none
+
+networkPolicy:
+  # Set explicit production network CIDRs before enabling this policy.
+  enabled: false

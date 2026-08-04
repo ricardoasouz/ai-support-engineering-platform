@@ -1,0 +1,99 @@
+{{- if .Values.observability.enabled }}
+{{- if .Values.observability.tempo.persistence.enabled }}
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: {{ include "ai-support-platform.fullname" . }}-tempo
+  labels:
+    {{- include "ai-support-platform.labels" . | nindent 4 }}
+    app.kubernetes.io/component: tempo
+spec:
+  accessModes: ["ReadWriteOnce"]
+  {{- with .Values.observability.tempo.persistence.storageClass }}
+  storageClassName: {{ . | quote }}
+  {{- end }}
+  resources:
+    requests: {storage: {{ .Values.observability.tempo.persistence.size }}}
+---
+{{- end }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "ai-support-platform.fullname" . }}-tempo
+  labels:
+    {{- include "ai-support-platform.labels" . | nindent 4 }}
+    app.kubernetes.io/component: tempo
+spec:
+  replicas: 1
+  strategy: {type: Recreate}
+  selector:
+    matchLabels:
+      {{- include "ai-support-platform.componentLabels" (dict "root" . "component" "tempo") | nindent 6 }}
+  template:
+    metadata:
+      annotations:
+        checksum/observability-config: {{ include (print $.Template.BasePath "/observability-configmaps.yaml") . | sha256sum }}
+      labels:
+        {{- include "ai-support-platform.componentLabels" (dict "root" . "component" "tempo") | nindent 8 }}
+    spec:
+      serviceAccountName: {{ include "ai-support-platform.platformServiceAccountName" . }}
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        runAsGroup: 10001
+        fsGroup: 10001
+        seccompProfile: {type: {{ .Values.podSecurity.seccompProfile }}}
+      containers:
+        - name: tempo
+          image: "{{ .Values.observability.tempo.image.repository }}:{{ .Values.observability.tempo.image.tag }}"
+          args: ["-config.file=/etc/tempo/tempo.yaml"]
+          ports:
+            - {name: http, containerPort: 3200}
+            - {name: otlp-grpc, containerPort: 4317}
+            - {name: otlp-http, containerPort: 4318}
+          readinessProbe:
+            httpGet: {path: /ready, port: http}
+            periodSeconds: 5
+          livenessProbe:
+            httpGet: {path: /ready, port: http}
+            periodSeconds: 10
+            failureThreshold: 6
+          resources:
+            {{- toYaml .Values.observability.tempo.resources | nindent 12 }}
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: {drop: ["ALL"]}
+          volumeMounts:
+            - {name: config, mountPath: /etc/tempo/tempo.yaml, subPath: tempo.yaml, readOnly: true}
+            - {name: data, mountPath: /var/tempo}
+            - {name: tmp, mountPath: /tmp}
+      volumes:
+        - name: config
+          configMap: {name: {{ include "ai-support-platform.fullname" . }}-tempo}
+        - name: data
+          {{- if .Values.observability.tempo.persistence.enabled }}
+          persistentVolumeClaim: {claimName: {{ include "ai-support-platform.fullname" . }}-tempo}
+          {{- else }}
+          emptyDir: {}
+          {{- end }}
+        - name: tmp
+          emptyDir: {sizeLimit: 64Mi}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "ai-support-platform.fullname" . }}-tempo
+  labels:
+    {{- include "ai-support-platform.labels" . | nindent 4 }}
+    app.kubernetes.io/component: tempo
+spec:
+  type: ClusterIP
+  selector:
+    {{- include "ai-support-platform.componentLabels" (dict "root" . "component" "tempo") | nindent 4 }}
+  ports:
+    - {name: http, port: 3200, targetPort: http}
+    - {name: otlp-grpc, port: 4317, targetPort: otlp-grpc}
+    - {name: otlp-http, port: 4318, targetPort: otlp-http}
+{{- end }}

@@ -56,6 +56,14 @@ class Settings(BaseSettings):
         le=1_048_576,
     )
     api_workers: int = Field(default=2, validation_alias="API_WORKERS", ge=1, le=16)
+    run_database_migrations_on_startup: bool = Field(
+        default=True,
+        validation_alias="RUN_DATABASE_MIGRATIONS_ON_STARTUP",
+    )
+    run_knowledge_ingestion_on_startup: bool = Field(
+        default=True,
+        validation_alias="RUN_KNOWLEDGE_INGESTION_ON_STARTUP",
+    )
     otel_service_name: str = Field(
         default="ai-support-api",
         validation_alias="OTEL_SERVICE_NAME",

@@ -22,7 +22,10 @@ as availability permits; this project does not promise a commercial response SLA
 This is a local/demo platform, not an internet-ready deployment. It has strict input
 bounds, read-only agent tools, structured model validation, container least-
 privilege controls, dependency/secret/image scanning, and no external AI provider.
-It does not yet provide API authentication or authorization, TLS termination,
+The Helm chart adds non-root pods, internal services, Secret references, and optional
+NetworkPolicies, but its embedded PostgreSQL/Kafka/Ollama services remain local/demo
+single-node components. It does not provide API authentication or authorization, TLS termination,
 multi-tenant isolation, encrypted Kafka transport, production secret management,
 high availability, backups/disaster recovery, or a formal penetration test. Do not
-expose the Compose stack directly to an untrusted network.
+expose either the Compose stack or a default Helm installation directly to an
+untrusted network.

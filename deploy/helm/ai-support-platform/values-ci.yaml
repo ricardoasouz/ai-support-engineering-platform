@@ -1,0 +1,27 @@
+# Hosted CI uses deterministic providers and avoids downloading Ollama models.
+global:
+  appEnvironment: integration
+
+image:
+  tag: ci
+  pullPolicy: Never
+
+config:
+  providers:
+    allowFake: true
+    llm: fake
+    embedding: fake
+  telemetry:
+    tracesExporter: none
+    metricsExporter: none
+
+ollama:
+  enabled: false
+  modelInit:
+    enabled: false
+
+observability:
+  enabled: false
+
+networkPolicy:
+  enabled: true

@@ -1,0 +1,18 @@
+{{- if .Values.kafka.enabled }}
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "ai-support-platform.fullname" . }}-kafka
+  labels:
+    {{- include "ai-support-platform.labels" . | nindent 4 }}
+    app.kubernetes.io/component: kafka
+spec:
+  type: ClusterIP
+  selector:
+    {{- include "ai-support-platform.componentLabels" (dict "root" . "component" "kafka") | nindent 4 }}
+  ports:
+    - name: kafka
+      port: {{ .Values.kafka.port }}
+      targetPort: kafka
+      protocol: TCP
+{{- end }}

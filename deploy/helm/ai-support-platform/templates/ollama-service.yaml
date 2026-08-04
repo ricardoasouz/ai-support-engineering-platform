@@ -1,0 +1,18 @@
+{{- if .Values.ollama.enabled }}
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "ai-support-platform.fullname" . }}-ollama
+  labels:
+    {{- include "ai-support-platform.labels" . | nindent 4 }}
+    app.kubernetes.io/component: ollama
+spec:
+  type: ClusterIP
+  selector:
+    {{- include "ai-support-platform.componentLabels" (dict "root" . "component" "ollama") | nindent 4 }}
+  ports:
+    - name: http
+      port: {{ .Values.ollama.port }}
+      targetPort: http
+      protocol: TCP
+{{- end }}

@@ -25,6 +25,17 @@ jobs:
           cache-dependency-path: requirements-dev.lock
       - name: Install hash-locked dependencies
         run: python -m pip install --require-hashes --requirement requirements-dev.lock
+      - name: Install checksum-verified Helm
+        shell: bash
+        env:
+          HELM_VERSION: 4.2.0
+        run: |
+          archive="helm-v${HELM_VERSION}-linux-amd64.tar.gz"
+          curl -fsSL "https://get.helm.sh/${archive}" -o "/tmp/${archive}"
+          curl -fsSL "https://get.helm.sh/${archive}.sha256sum" -o "/tmp/${archive}.sha256sum"
+          (cd /tmp && sha256sum --check "${archive}.sha256sum")
+          tar -xzf "/tmp/${archive}" -C /tmp
+          sudo install -m 0755 /tmp/linux-amd64/helm /usr/local/bin/helm
       - name: Validate release version
         shell: bash
         run: |
@@ -40,6 +51,8 @@ jobs:
           python -m compileall -q app tests integration_tests scripts migrations
           python -m pip check
           python -m pip_audit --require-hashes --requirement requirements.lock
+          python scripts/k8s/validate-chart.py
+          helm lint deploy/helm/ai-support-platform
       - name: Build immutable release images
         run: |
           docker build --build-arg APP_VERSION="$APP_VERSION" --build-arg GIT_SHA="$GITHUB_SHA" --build-arg BUILD_TIME="$BUILD_TIME" --tag "ai-support-api:$APP_VERSION" --tag "ai-support-api:$GITHUB_SHA" .
@@ -52,6 +65,7 @@ jobs:
         shell: bash
         run: |
           mkdir -p release
+          helm package deploy/helm/ai-support-platform --destination release
           cyclonedx-py requirements requirements.lock --output-reproducible --of JSON -o release/python.cdx.json
           docker run --rm -v /var/run/docker.sock:/var/run/docker.sock -v "$PWD/release:/release" aquasec/trivy@sha256:7cced7cae583819fc7806d4cbc0dbbc7cad18b99f7d3e235192e6da8c091045c image --format cyclonedx --output /release/api-image.cdx.json "ai-support-api:$APP_VERSION"
           docker run --rm -v /var/run/docker.sock:/var/run/docker.sock -v "$PWD/release:/release" aquasec/trivy@sha256:7cced7cae583819fc7806d4cbc0dbbc7cad18b99f7d3e235192e6da8c091045c image --format cyclonedx --output /release/worker-image.cdx.json "ai-support-worker:$APP_VERSION"

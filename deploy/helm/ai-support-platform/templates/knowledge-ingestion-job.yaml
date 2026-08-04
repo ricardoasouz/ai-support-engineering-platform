@@ -1,0 +1,61 @@
+{{- if .Values.knowledgeIngestion.enabled }}
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: {{ include "ai-support-platform.fullname" . }}-knowledge-ingestion
+  labels:
+    {{- include "ai-support-platform.labels" . | nindent 4 }}
+    app.kubernetes.io/component: knowledge-ingestion
+  annotations:
+    helm.sh/hook: post-install,post-upgrade
+    helm.sh/hook-weight: "-5"
+    helm.sh/hook-delete-policy: {{ .Values.knowledgeIngestion.hookDeletePolicy | quote }}
+spec:
+  backoffLimit: {{ .Values.knowledgeIngestion.backoffLimit }}
+  activeDeadlineSeconds: {{ .Values.knowledgeIngestion.activeDeadlineSeconds }}
+  template:
+    metadata:
+      labels:
+        {{- include "ai-support-platform.componentLabels" (dict "root" . "component" "knowledge-ingestion") | nindent 8 }}
+    spec:
+      restartPolicy: Never
+      serviceAccountName: {{ include "ai-support-platform.jobsServiceAccountName" . }}
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: {{ .Values.podSecurity.runAsUser }}
+        runAsGroup: {{ .Values.podSecurity.runAsGroup }}
+        fsGroup: {{ .Values.podSecurity.fsGroup }}
+        seccompProfile:
+          type: {{ .Values.podSecurity.seccompProfile }}
+      containers:
+        - name: knowledge-ingestion
+          image: "{{ .Values.worker.image.repository }}:{{ .Values.image.tag }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          args: ["-m", "app.knowledge.ingest"]
+          envFrom:
+            - configMapRef:
+                name: {{ include "ai-support-platform.fullname" . }}-app
+          env:
+            - name: DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "ai-support-platform.secretName" . }}
+                  key: {{ .Values.secrets.keys.databaseUrl }}
+            - name: OTEL_SERVICE_NAME
+              value: ai-support-knowledge-ingestion
+          resources:
+            {{- toYaml .Values.knowledgeIngestion.resources | nindent 12 }}
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        - name: tmp
+          emptyDir:
+            sizeLimit: 64Mi
+{{- end }}

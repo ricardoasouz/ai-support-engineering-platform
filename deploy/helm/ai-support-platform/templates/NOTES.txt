@@ -1,0 +1,25 @@
+AI Support Engineering Platform is installed in namespace {{ .Release.Namespace }}.
+
+Check workloads:
+  kubectl get pods,pvc -n {{ .Release.Namespace }} -l app.kubernetes.io/instance={{ .Release.Name }}
+
+Port-forward the API:
+  kubectl port-forward -n {{ .Release.Namespace }} service/{{ include "ai-support-platform.fullname" . }}-api 8000:{{ .Values.api.service.port }}
+
+Check API health and build metadata:
+  curl http://127.0.0.1:8000/health
+  curl http://127.0.0.1:8000/build
+
+Submit a smoke incident:
+  curl -X POST http://127.0.0.1:8000/api/v1/incidents -H "Content-Type: application/json" -d '{"service":"billing-api","error":"PostgreSQL connection pool exhausted","log":"pool timeout while waiting for a connection","severity":"critical"}'
+
+Inspect API and worker logs:
+  kubectl logs -n {{ .Release.Namespace }} deployment/{{ include "ai-support-platform.fullname" . }}-api
+  kubectl logs -n {{ .Release.Namespace }} deployment/{{ include "ai-support-platform.fullname" . }}-worker
+
+{{- if .Values.observability.enabled }}
+Port-forward Grafana without exposing it publicly:
+  kubectl port-forward -n {{ .Release.Namespace }} service/{{ include "ai-support-platform.fullname" . }}-grafana 3000:{{ .Values.observability.grafana.service.port }}
+{{- end }}
+
+Credentials are read from Secret {{ include "ai-support-platform.secretName" . }} and are never printed here.

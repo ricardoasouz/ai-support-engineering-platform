@@ -1,0 +1,63 @@
+{{- if and .Values.ollama.enabled .Values.ollama.modelInit.enabled }}
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: {{ include "ai-support-platform.fullname" . }}-ollama-model-init
+  labels:
+    {{- include "ai-support-platform.labels" . | nindent 4 }}
+    app.kubernetes.io/component: ollama-model-init
+  annotations:
+    helm.sh/hook: post-install,post-upgrade
+    helm.sh/hook-weight: "-8"
+    helm.sh/hook-delete-policy: before-hook-creation,hook-succeeded
+spec:
+  backoffLimit: {{ .Values.ollama.modelInit.backoffLimit }}
+  activeDeadlineSeconds: {{ .Values.ollama.modelInit.activeDeadlineSeconds }}
+  template:
+    metadata:
+      labels:
+        {{- include "ai-support-platform.componentLabels" (dict "root" . "component" "ollama-model-init") | nindent 8 }}
+    spec:
+      restartPolicy: Never
+      serviceAccountName: {{ include "ai-support-platform.jobsServiceAccountName" . }}
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: {{ .Values.podSecurity.runAsUser }}
+        runAsGroup: {{ .Values.podSecurity.runAsGroup }}
+        seccompProfile:
+          type: {{ .Values.podSecurity.seccompProfile }}
+      containers:
+        - name: model-init
+          image: "{{ .Values.ollama.image.repository }}:{{ .Values.ollama.image.tag }}"
+          imagePullPolicy: {{ .Values.ollama.image.pullPolicy }}
+          command: ["/bin/sh", "-ec"]
+          args:
+            - >-
+              ollama show "$OLLAMA_LLM_MODEL" >/dev/null 2>&1 || ollama pull "$OLLAMA_LLM_MODEL";
+              ollama show "$OLLAMA_EMBEDDING_MODEL" >/dev/null 2>&1 || ollama pull "$OLLAMA_EMBEDDING_MODEL"
+          env:
+            - name: OLLAMA_HOST
+              value: "http://{{ include "ai-support-platform.fullname" . }}-ollama:{{ .Values.ollama.port }}"
+            - name: OLLAMA_LLM_MODEL
+              value: {{ .Values.ollama.models.llm | quote }}
+            - name: OLLAMA_EMBEDDING_MODEL
+              value: {{ .Values.ollama.models.embedding | quote }}
+            - name: HOME
+              value: /tmp
+          resources:
+            requests: {cpu: 50m, memory: 128Mi}
+            limits: {cpu: 500m, memory: 512Mi}
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        - name: tmp
+          emptyDir:
+            sizeLimit: 128Mi
+{{- end }}

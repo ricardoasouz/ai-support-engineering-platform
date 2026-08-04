@@ -1,0 +1,35 @@
+{{- if .Values.kafka.enabled }}
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "ai-support-platform.fullname" . }}-kafka-headless
+  labels:
+    {{- include "ai-support-platform.labels" . | nindent 4 }}
+    app.kubernetes.io/component: kafka
+spec:
+  clusterIP: None
+  # Governing StatefulSet Service: publishes per-pod DNS records
+  # (<pod>.<service>) regardless of readiness, so the single-node KRaft
+  # broker can resolve its own controller and advertised client addresses to
+  # complete controller registration and probe checks -- steps that
+  # readiness itself depends on. This is the documented Kubernetes
+  # StatefulSet pattern for peer bootstrap before Ready, scoped to this
+  # internal governing Service only (never set on the client-facing
+  # ClusterIP Service, which must keep gating on readiness).
+  #
+  # This chart runs a single-node KRaft broker (replicas: 1, fixed ordinal
+  # "-0"); it is an intentionally non-HA local/demo Kafka topology, not a
+  # multi-broker cluster, so a hard-coded single pod identity is sufficient.
+  publishNotReadyAddresses: true
+  selector:
+    {{- include "ai-support-platform.componentLabels" (dict "root" . "component" "kafka") | nindent 4 }}
+  ports:
+    - name: kafka
+      port: {{ .Values.kafka.port }}
+      targetPort: kafka
+      protocol: TCP
+    - name: controller
+      port: {{ .Values.kafka.controllerPort }}
+      targetPort: controller
+      protocol: TCP
+{{- end }}

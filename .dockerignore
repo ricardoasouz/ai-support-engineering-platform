@@ -5,12 +5,14 @@
 .ruff_cache
 .uv-cache
 .uv-tools
+.tools
 __pycache__
 *.py[cod]
 tests
 .github
 integration_tests
 scripts
+deploy
 security-reports
 *.md
 !knowledge_base/*.md

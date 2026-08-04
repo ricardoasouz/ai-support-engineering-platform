@@ -1,0 +1,12 @@
+# Optional NVIDIA scheduling example. The NVIDIA device plugin must already exist.
+ollama:
+  resources:
+    requests:
+      cpu: "1"
+      memory: 6Gi
+    limits:
+      cpu: "4"
+      memory: 12Gi
+      nvidia.com/gpu: "1"
+  nodeSelector: {}
+  tolerations: []
