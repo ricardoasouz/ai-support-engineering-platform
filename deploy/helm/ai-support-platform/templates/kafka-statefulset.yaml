@@ -7,7 +7,7 @@ metadata:
     {{- include "ai-support-platform.labels" . | nindent 4 }}
     app.kubernetes.io/component: kafka
 spec:
-  serviceName: {{ include "ai-support-platform.fullname" . }}-kafka
+  serviceName: {{ include "ai-support-platform.fullname" . }}-kafka-headless
   replicas: 1
   selector:
     matchLabels:
@@ -45,7 +45,7 @@ spec:
             - {name: KAFKA_ADVERTISED_LISTENERS, value: "PLAINTEXT://{{ include "ai-support-platform.fullname" . }}-kafka:{{ .Values.kafka.port }}"}
             - {name: KAFKA_INTER_BROKER_LISTENER_NAME, value: "PLAINTEXT"}
             - {name: KAFKA_CONTROLLER_LISTENER_NAMES, value: "CONTROLLER"}
-            - {name: KAFKA_CONTROLLER_QUORUM_VOTERS, value: "1@{{ include "ai-support-platform.fullname" . }}-kafka:{{ .Values.kafka.controllerPort }}"}
+            - {name: KAFKA_CONTROLLER_QUORUM_VOTERS, value: "1@{{ include "ai-support-platform.fullname" . }}-kafka-0.{{ include "ai-support-platform.fullname" . }}-kafka-headless:{{ .Values.kafka.controllerPort }}"}
             - {name: KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR, value: "1"}
             - {name: KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR, value: "1"}
             - {name: KAFKA_TRANSACTION_STATE_LOG_MIN_ISR, value: "1"}
