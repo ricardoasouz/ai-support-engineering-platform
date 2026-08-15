@@ -50,18 +50,13 @@ network; only FastAPI and Grafana are published to the host.
 
 ## Key Features
 
-- **Synchronous incident intake** — validated FastAPI contracts and deterministic
-  classification for authentication, database connection, timeout, and unknown failures.
-- **Asynchronous processing** — transactional outbox publication, Kafka KRaft,
-  manual consumer offsets, retry handling, and poison-message acknowledgement.
-- **Durable execution** — persisted incidents, outbox events, processed-event
-  markers, resolutions, agent state, sanitized steps, and review feedback.
-- **Grounded RAG** — five versioned repository runbooks, idempotent ingestion,
-  768-dimensional embeddings, pgvector retrieval, and validated citations.
-- **Controlled AI agent** — versioned planner/resolver prompts, strict structured
-  output, bounded retries and tool budgets, and a fixed read-only tool registry.
-- **Human in the loop** — generated results enter `awaiting_review`; feedback,
-  approval, and rejection are explicit, durable API operations.
+- **Incident intake** — validated FastAPI contracts and deterministic classification.
+- **Async delivery** — atomic outbox records, Kafka, manual offsets, retries, and
+  durable idempotency markers, resolution state, audit steps, and feedback.
+- **Grounded RAG** — five versioned runbooks, idempotent ingestion, pgvector
+  retrieval over 768-dimensional embeddings, and validated citations.
+- **Controlled agent** — versioned prompts, structured output, bounded read-only
+  tools and retries, sanitized audit records, and explicit human review.
 - **Full-stack observability** — correlated JSON logs, W3C trace propagation,
   low-cardinality metrics, Tempo traces, and four provisioned Grafana dashboards.
 - **Portable packaging** — hardened Distroless containers, Docker Compose, and a
@@ -154,26 +149,36 @@ Execution state and sanitized steps are durable. Clients poll the resolution and
 execution endpoints; completed AI output waits in `awaiting_review` until approved
 or rejected.
 
+**System in action.** Live responses from a synthetic Ollama-backed incident show the grounded resolution, runbook citations, executed tools, and review state.
+
+<p align="center">
+  <img src="docs/assets/incident-resolution-example.png" alt="Live synthetic incident resolution with PostgreSQL runbook citations, controlled tool use, and awaiting-review agent state" width="900">
+</p>
+
 ## Observability
 
-API and worker traces preserve W3C context across the outbox record, Kafka headers,
-and consumer processing. Spans cover request handling, publication, event validation,
-agent execution, tools, retrieval, Ollama calls, citation validation, persistence,
-and offset commits. JSON logs include active `trace_id` and `span_id`, plus safe
-incident, event, and execution correlation identifiers.
+W3C context crosses the outbox record, Kafka headers, and consumer processing. Spans
+cover API, publication, agent, retrieval, model, persistence, and offset operations;
+JSON logs include trace, span, incident, event, and execution correlation IDs.
 
 Metrics cover API latency/errors, incident classification, outbox and Kafka flow,
 worker processing, agent/tool/model behavior, RAG retrieval and citations, review
 outcomes, and database operations. An enforced label policy excludes unbounded
 service names, IDs, offsets, raw incident text, prompts, and user input.
 
-Grafana is available at `http://127.0.0.1:3000` by default and provisions Prometheus,
-Tempo, and these dashboards under **AI Support Platform**:
+Grafana provisions Prometheus, Tempo, and four dashboards: **Platform Overview**,
+**Kafka and Outbox**, **AI / RAG / Agent**, and **Operational Health**.
 
-- **Platform Overview** — API, incidents, Kafka/worker, agent status, and Ollama.
-- **Kafka and Outbox** — pending events, retries, failures, duplicates, and duration.
-- **AI / RAG / Agent** — model, tool, agent, retrieval, citation, and review signals.
-- **Operational Health** — service, HTTP, worker, database, Kafka, and Ollama health.
+<p align="center">
+  <img src="docs/assets/grafana-platform-overview.png" alt="Grafana Platform Overview showing live API, Kafka, worker, agent, and Ollama telemetry for a synthetic incident" width="900">
+</p>
+
+The same 99-span, two-service trace connects the API transaction and outbox dispatch
+to Kafka and asynchronous worker processing.
+
+<p align="center">
+  <img src="docs/assets/tempo-incident-trace.png" alt="Tempo distributed trace showing incident analysis, the PostgreSQL outbox transaction, Kafka publication, and asynchronous processing" width="900">
+</p>
 
 The applications do not expose `/metrics`; Prometheus scrapes the Collector exporter.
 Telemetry excludes request bodies, raw incident logs, SQL text, retrieved content,
@@ -185,8 +190,7 @@ trace/log correlation details are covered in the
 
 ### Prerequisites
 
-- Python 3.14 with the hash-locked development dependencies installed as described
-  in [CONTRIBUTING.md](CONTRIBUTING.md)
+- Python 3.14 with the dependencies described in [CONTRIBUTING.md](CONTRIBUTING.md)
 - Docker Desktop or Docker Engine with Compose v2
 - Git
 - Sufficient disk and memory for the configured Ollama models
@@ -234,9 +238,8 @@ or production use.
 | Packaging | Docker Compose, Distroless Debian 13 runtime, Helm 3, Kubernetes/Kind tooling |
 | Quality and security | pytest, Ruff, pip-audit, Trivy, Gitleaks, Actionlint, CycloneDX SBOMs |
 
-The default embedding width is `768`; changing it requires an explicit database
-migration. Direct dependencies live in `requirements*.txt`, while containers and CI
-install from hash-locked `requirements*.lock` files. `VERSION` is authoritative.
+Changing the default 768-dimensional embedding width requires a migration. Containers
+and CI install from `requirements*.lock`; `VERSION` is authoritative.
 
 ## Project Structure
 
@@ -271,12 +274,9 @@ install from hash-locked `requirements*.lock` files. `VERSION` is authoritative.
 
 ## Testing
 
-Tests are separated into three markers:
-
-- `unit` — SQLite and fake ports/providers/Kafka; no Docker or network.
-- `integration` — real PostgreSQL/pgvector, migrations, Kafka, API, outbox, and worker
-  in an isolated Compose project with explicitly enabled fake AI providers.
-- `e2e` — incident creation through a cited resolution in `awaiting_review`.
+Test markers are `unit` (SQLite and fakes, without Docker/network), `integration`
+(isolated PostgreSQL/pgvector, Kafka, API, outbox, and worker), and `e2e` (incident
+creation through a cited resolution in `awaiting_review`).
 
 The default suite collects all layers but skips Docker-backed tests unless
 `RUN_INTEGRATION_TESTS=1` is set.
