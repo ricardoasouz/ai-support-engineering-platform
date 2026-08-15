@@ -1,701 +1,389 @@
 # AI Support Engineering Platform
 
-Phase 8 adds portable Kubernetes packaging and Helm deployment architecture to the
-existing delivery-hardened controlled-agent platform. Incident creation,
-the transactional outbox, Kafka worker, grounded local RAG, human review, and Phase 6
-telemetry behavior are unchanged. Telemetry remains best-effort: an unavailable
-Collector, Prometheus, Tempo, or Grafana does not block the application plane.
+[![Python 3.14](https://img.shields.io/badge/Python-3.14-3776AB?logo=python&logoColor=white)](https://www.python.org/)
+[![FastAPI](https://img.shields.io/badge/FastAPI-0.141-009688?logo=fastapi&logoColor=white)](https://fastapi.tiangolo.com/)
+[![PostgreSQL](https://img.shields.io/badge/PostgreSQL-17-4169E1?logo=postgresql&logoColor=white)](https://www.postgresql.org/)
+[![Apache Kafka](https://img.shields.io/badge/Apache_Kafka-4.3-231F20?logo=apachekafka&logoColor=white)](https://kafka.apache.org/)
+[![Docker Compose](https://img.shields.io/badge/Docker_Compose-supported-2496ED?logo=docker&logoColor=white)](https://docs.docker.com/compose/)
+[![Kubernetes](https://img.shields.io/badge/Kubernetes-Helm_packaged-326CE5?logo=kubernetes&logoColor=white)](https://kubernetes.io/)
 
-The default stack remains local: PostgreSQL 17 with pgvector, Apache Kafka in KRaft
-mode, Ollama, OpenTelemetry Collector, Prometheus, Tempo, and Grafana. It needs no
-cloud AI API, external API key, or vendor-specific telemetry backend. Docker Compose
-remains supported; Kubernetes uses isolated storage and never reuses Compose data.
+An event-driven platform for deterministic incident intake and asynchronous,
+retrieval-grounded AI analysis. It combines a FastAPI API, a transactional outbox,
+Kafka workers, local Ollama inference, pgvector retrieval, auditable agent execution,
+explicit human review, and OpenTelemetry-based observability.
 
-## Phase 8 Kubernetes architecture
+> [!IMPORTANT]
+> This repository is an engineering reference implementation, not a production
+> deployment. The default topology is local, unauthenticated, and single-host. See
+> [Production readiness](docs/production-readiness.md) before using real incident data.
 
-```text
-Optional Ingress -> ClusterIP API -> API Deployment
-                                   |-- PostgreSQL/pgvector StatefulSet (local only)
-                                   |-- Kafka KRaft StatefulSet (local only)
-                                   `-- Ollama + persistent models (optional)
-                                               |
-Kafka incident.created -> independently scalable Worker Deployment -> Agent / RAG
+## Navigation
 
-API + Worker -> OTel Collector -> Prometheus + Tempo -> Grafana
+[Overview](#overview) · [Key Features](#key-features) · [Architecture](#architecture) ·
+[Incident Workflow](#incident-workflow) · [Observability](#observability) ·
+[Quick Start](#quick-start) · [Technology Stack](#technology-stack) ·
+[Project Structure](#project-structure) · [Testing](#testing) ·
+[End-to-End Example](#end-to-end-example) · [Roadmap](#roadmap) ·
+[Contributing](#contributing) · [License](#license)
+
+Related documentation: [Kubernetes](docs/kubernetes.md),
+[production readiness](docs/production-readiness.md), and [security](SECURITY.md).
+
+## Overview
+
+The API accepts an incident, applies deterministic classification, and commits the
+incident and an `incident.created` outbox event in one PostgreSQL transaction. It
+returns without waiting for Kafka, retrieval, or model inference. A background
+dispatcher publishes acknowledged outbox events to Kafka, where an independently
+running worker performs the controlled AI workflow.
+
+The worker gathers incident metadata and runbook evidence through a fixed set of
+read-only tools. Retrieval uses repository-owned runbooks, deterministic chunking,
+Ollama embeddings, and a pgvector HNSW cosine index. A structured resolver persists
+a cited resolution and moves the durable agent execution to `awaiting_review`.
+Operators can then approve or reject it through explicit API operations.
+
+The default Compose stack is self-contained: it does not require a cloud AI API,
+external API key, or vendor-specific telemetry backend. PostgreSQL, Kafka, Ollama,
+the OpenTelemetry Collector, Prometheus, Tempo, and Grafana remain inside the Compose
+network; only FastAPI and Grafana are published to the host.
+
+## Key Features
+
+- **Synchronous incident intake** — validated FastAPI contracts and deterministic
+  classification for authentication, database connection, timeout, and unknown failures.
+- **Asynchronous processing** — transactional outbox publication, Kafka KRaft,
+  manual consumer offsets, retry handling, and poison-message acknowledgement.
+- **Durable execution** — persisted incidents, outbox events, processed-event
+  markers, resolutions, agent state, sanitized steps, and review feedback.
+- **Grounded RAG** — five versioned repository runbooks, idempotent ingestion,
+  768-dimensional embeddings, pgvector retrieval, and validated citations.
+- **Controlled AI agent** — versioned planner/resolver prompts, strict structured
+  output, bounded retries and tool budgets, and a fixed read-only tool registry.
+- **Human in the loop** — generated results enter `awaiting_review`; feedback,
+  approval, and rejection are explicit, durable API operations.
+- **Full-stack observability** — correlated JSON logs, W3C trace propagation,
+  low-cardinality metrics, Tempo traces, and four provisioned Grafana dashboards.
+- **Portable packaging** — hardened Distroless containers, Docker Compose, and a
+  Helm chart with embedded-local and external-service deployment modes.
+- **Delivery controls** — hash-locked dependencies, layered tests, migrations,
+  CI security scans, SBOM generation, and versioned release artifacts.
+
+## Architecture
+
+```mermaid
+flowchart LR
+    Client[API client] --> API[FastAPI API]
+    API -->|incident + outbox event<br/>one transaction| PG[(PostgreSQL + pgvector)]
+    API -->|deterministic analysis| Client
+    Dispatcher[Outbox dispatcher] -->|read pending events| PG
+    Dispatcher -->|incident.created| Kafka[Apache Kafka]
+    Kafka --> Worker[Incident worker]
+    Worker --> Agent[Controlled agent]
+    Agent -->|metadata and state| PG
+    Agent -->|runbook retrieval| PG
+    Agent -->|generation + embeddings| Ollama[Ollama]
+    Agent -->|resolution, steps, review state| PG
+    Reviewer[Human reviewer] -->|feedback / approve / reject| API
 ```
 
-The Helm chart supports embedded local services and an external-service mode where
-Kubernetes runs only API, worker, migration/ingestion Jobs, and optional telemetry.
-Secrets are referenced out-of-band; application pods retain the Phase 7 non-root,
-read-only Distroless controls. See the [Kubernetes deployment guide](docs/kubernetes.md)
-for installation, persistence, scaling, recovery, rollout, and rollback.
+The application and telemetry planes are intentionally separate. Telemetry is
+best-effort: Collector, Prometheus, Tempo, or Grafana failure does not roll back an
+incident or block the application plane.
 
-## Phase 7 delivery architecture
-
-```text
-Pull request / main push
-        |
-        +-- CI: hash-locked install -> unit tests -> Ruff/compile -> pip audit
-        |        -> workflow validation -> Gitleaks -> Trivy filesystem/images
-        |        -> CycloneDX Python and image SBOM artifacts
-        |
-        +-- Integration: isolated Compose project
-                 PostgreSQL/pgvector + migrations + Kafka + API + worker
-                 deterministic fake AI providers -> complete cited review flow
-
-Manual dispatch                        v0.7.0 tag
-        |                                  |
-        +-- complete infrastructure        +-- quality + audit + image build/scan
-            with disclosed fake AI             + SBOM + versioned image archives
-        +-- optional labeled self-hosted
-            runner with real Ollama
+```mermaid
+flowchart LR
+    API[ai-support-api] -->|OTLP/gRPC| OTel[OpenTelemetry Collector]
+    Worker[ai-support-worker] -->|OTLP/gRPC| OTel
+    OTel -->|Prometheus exporter| Prom[Prometheus]
+    OTel -->|OTLP traces| Tempo[Tempo]
+    Prom --> Grafana[Grafana]
+    Tempo --> Grafana
 ```
 
-The ordinary CI path never downloads multi-gigabyte Ollama models. Fake providers
-are deterministic, make no network calls, and are accepted only when both
-`APP_ENVIRONMENT` is `test`/`integration` and `ALLOW_FAKE_PROVIDERS=true`. The
-Docker-backed stack uses a distinct project and volumes, so it cannot modify the
-normal developer database or Kafka data.
+### Delivery and failure semantics
 
-## Phase 6 architecture
+The platform provides at-least-once delivery. Incidents and outbox records commit
+atomically; broker failures leave events available for retry. The consumer uses
+manual offsets, retryable failures seek back, and `processed_events.event_id` plus
+unique execution/resolution records prevent duplicate durable outcomes. Agent steps
+are persisted for restart recovery, and the resolution and `awaiting_review` state
+commit before the Kafka offset. A crash before a step commit can repeat a read-only
+provider call, so exactly-once model invocation is not claimed.
 
-```text
-Client
-  |
-  v
-FastAPI POST /api/v1/incidents
-  |
-  +-- deterministic Phase 1 analysis
-  +-- one PostgreSQL transaction
-        +-- incidents
-        +-- outbox_events (incident.created)
-  +-- return without waiting for Kafka, retrieval, or a model
+### Agent controls
 
-Outbox dispatcher -- acknowledged publish --> Kafka incident.created
-                                                  |
-                                                  v
-                                      incident-processing-v1 worker
-                                                  |
-                                      claim/resume agent_execution
-                                                  |
-                                  structured planner (versioned prompt)
-                                                  |
-                            validate tool name, schema, scope, size, budgets
-                                                  |
-                         +------------------------+------------------------+
-                         | typed read-only evidence tools only             |
-                         | PostgreSQL metadata + Phase 4 pgvector retrieval|
-                         +------------------------+------------------------+
-                                                  |
-                               persist sanitized agent_step after each call
-                                                  |
-                                    structured resolver + local guardrails
-                                                  |
-                       persist ai_resolution + awaiting_review atomically
-                                                  |
-                                  insert processed_events idempotency marker
-                                                  |
-                                         commit Kafka offset
+The fixed registry contains six read-only tools: `get_incident`,
+`retrieve_runbooks`, `search_similar_incidents`, `get_previous_resolutions`,
+`get_incident_resolution_context`, and `summarize_evidence`.
+
+There is no SQL, shell, filesystem, web, generic HTTP, Kubernetes, cloud,
+credential, or remediation tool. The server enforces schemas, incident scope, size,
+timeouts, repetition, and step/tool budgets. Final output requires incident metadata
+and a runbook retrieval attempt; citations must match retrieved evidence. Missing
+citable evidence caps confidence at `0.5` and requires escalation and human review.
+Audit records store sanitized tool/evidence summaries and prompt/provider provenance,
+not complete prompts, raw logs, secrets, reviewer identity, or chain-of-thought.
+
+## Incident Workflow
+
+```mermaid
+sequenceDiagram
+    actor Client
+    participant API as FastAPI
+    participant DB as PostgreSQL
+    participant Kafka
+    participant Worker
+    participant AI as Agent / RAG / Ollama
+    actor Reviewer
+
+    Client->>API: POST /api/v1/incidents
+    API->>DB: Commit incident + outbox event
+    API-->>Client: Deterministic analysis (200)
+    DB-->>Kafka: Dispatcher publishes incident.created
+    Kafka->>Worker: Consume event
+    Worker->>AI: Gather incident + runbook evidence
+    AI->>DB: Persist sanitized steps and cited resolution
+    Worker->>DB: Set awaiting_review + processed marker
+    Client->>API: Poll resolution / execution endpoints
+    Reviewer->>API: Approve or reject resolution
+    API->>DB: Persist feedback and review state
 ```
 
-The application and telemetry planes are deliberately separate:
+Execution state and sanitized steps are durable. Clients poll the resolution and
+execution endpoints; completed AI output waits in `awaiting_review` until approved
+or rejected.
 
-```text
-Application plane                         Telemetry plane
+## Observability
 
-Client                                    ai-support-api
-  |                                             +
-  v                                             |
-FastAPI --> PostgreSQL / outbox                 | OTLP/gRPC
-                  |                             v
-                  v                       OpenTelemetry Collector
-                Kafka                           |              |
-                  |                             | metrics      | traces
-                  v                             v              v
-Worker --> Agent / pgvector / Ollama       Prometheus        Tempo
-                                                        \      /
-                                                         Grafana
-```
+API and worker traces preserve W3C context across the outbox record, Kafka headers,
+and consumer processing. Spans cover request handling, publication, event validation,
+agent execution, tools, retrieval, Ollama calls, citation validation, persistence,
+and offset commits. JSON logs include active `trace_id` and `span_id`, plus safe
+incident, event, and execution correlation identifiers.
 
-API and worker export through one path: OTLP to the Collector. The Collector exposes
-a Prometheus-compatible endpoint for Prometheus to scrape and sends traces to Tempo.
-The applications do not expose `/metrics`, which prevents double collection. Grafana
-queries provisioned Prometheus and Tempo data sources.
+Metrics cover API latency/errors, incident classification, outbox and Kafka flow,
+worker processing, agent/tool/model behavior, RAG retrieval and citations, review
+outcomes, and database operations. An enforced label policy excludes unbounded
+service names, IDs, offsets, raw incident text, prompts, and user input.
 
-Database mappings, API routes, analyzers, provider adapters, prompts, tools,
-orchestration, evaluation, and Kafka handling stay in separate modules. HTTP routes
-never run inference. Kafka or Ollama failure never rolls back a persisted incident.
+Grafana is available at `http://127.0.0.1:3000` by default and provisions Prometheus,
+Tempo, and these dashboards under **AI Support Platform**:
 
-Important Phase 5 paths:
+- **Platform Overview** — API, incidents, Kafka/worker, agent status, and Ollama.
+- **Kafka and Outbox** — pending events, retries, failures, duplicates, and duration.
+- **AI / RAG / Agent** — model, tool, agent, retrieval, citation, and review signals.
+- **Operational Health** — service, HTTP, worker, database, Kafka, and Ollama health.
 
-```text
-app/agent/models.py          # strict request/state/step/final/review models
-app/agent/tools.py           # fixed tool registry and validated executor
-app/agent/workflow.py        # bounded durable plan/tool/final loop
-app/agent/sanitization.py    # audit redaction and size bounds
-app/ai/prompts/*/v1.txt      # allowlisted versioned prompt templates
-app/ai/prompt_registry.py    # safe image-bundled prompt loader
-app/evaluation/              # golden cases, metrics, fake runner, export CLI
-app/repositories/agent.py    # execution, steps, feedback, review persistence
-app/observability/           # tracing, metrics, instrumentation, context helpers
-observability/               # Collector, Prometheus, Tempo, Grafana provisioning
-migrations/versions/         # SQLAlchemy/Alembic schema history
-.github/workflows/           # quality, security, integration, full-stack, release
-docker-compose.integration.yml # isolated real-infrastructure CI topology
-scripts/validate_config.py   # secret-safe, fail-fast environment validation
-requirements*.lock           # universal, hash-locked resolved dependencies
-```
+The applications do not expose `/metrics`; Prometheus scrapes the Collector exporter.
+Telemetry excludes request bodies, raw incident logs, SQL text, retrieved content,
+prompts, model responses, identities, secrets, and chain-of-thought. Retention and
+trace/log correlation details are covered in the
+[production-readiness guide](docs/production-readiness.md) and Compose configuration.
 
-## Controlled agent execution
+## Quick Start
 
-The planner returns a bounded JSON decision containing `goal`, `next_action`, an
-optional `tool_name` and arguments, a short `reason_summary`, and
-`expected_evidence`. The reason summary is an auditable decision description, not a
-request for or record of private chain-of-thought.
+### Prerequisites
 
-The loop loads or resumes durable state, requests one structured decision, validates
-the decision locally, executes at most one approved tool, persists a sanitized step,
-and repeats. Before final output it requires both incident metadata and a runbook
-retrieval attempt. The resolver then returns:
+- Python 3.14 with the hash-locked development dependencies installed as described
+  in [CONTRIBUTING.md](CONTRIBUTING.md)
+- Docker Desktop or Docker Engine with Compose v2
+- Git
+- Sufficient disk and memory for the configured Ollama models
 
-Planner prompt `v2` states the conditional tool/final field shapes explicitly.
-Locally, only unambiguous action aliases, server-mandated tool literals, and empty
-tool fields on final actions are normalized. Missing or unknown tool names are never
-mapped to executable tools. If structured planner validation still fails after the
-existing bounded repairs, the server may select a schema-valid `final` action only
-when both mandatory evidence tools have already succeeded; the resolver and citation
-guardrails still validate the resulting answer.
-
-```json
-{
-  "summary": "The request used an expired JWT.",
-  "root_cause": "The token lifetime elapsed.",
-  "recommended_actions": ["Have an operator refresh the token and retry."],
-  "confidence": 0.91,
-  "cited_sources": [
-    {"source_id": "runbook-jwt-authentication", "chunk_id": 12}
-  ],
-  "evidence_summary": "Incident metadata and the JWT runbook agree.",
-  "tools_used": ["get_incident", "retrieve_runbooks"],
-  "limitations": [],
-  "escalation_required": false,
-  "human_review_recommended": true
-}
-```
-
-Local validation rejects unknown or duplicate citations and tools that did not run.
-When citation-addressable evidence is unavailable, the server caps confidence at
-0.5, records a limitation, and requires escalation and human review.
-
-Execution states are `pending`, `running`, `waiting_for_tool`, `completed`,
-`retryable`, `failed`, `cancelled`, `awaiting_review`, `approved`, and `rejected`.
-Generated results enter `awaiting_review`; approval and rejection are explicit API
-operations.
-
-## Approved tools and guardrails
-
-The registry contains exactly these read-only tools:
-
-- `get_incident`: incident metadata and deterministic analysis; raw log omitted;
-- `retrieve_runbooks`: bounded Phase 4 pgvector retrieval;
-- `search_similar_incidents`: metadata matches without raw logs;
-- `get_previous_resolutions`: bounded prior resolution summaries and citations;
-- `get_incident_resolution_context`: previously persisted retrieval evidence;
-- `summarize_evidence`: deterministic normalization of prior tool results.
-
-There is no SQL, shell, filesystem, web, generic HTTP, Kubernetes, cloud, credential,
-or remediation tool. Unknown names, extra or invalid fields, cross-incident IDs,
-oversized arguments/results, repeated calls, timeouts, and exhausted budgets are
-rejected by server code. Planner output never expands the allowlist.
-
-The following are configurable hard limits:
-
-- total steps and tool calls;
-- repeated identical tool calls;
-- retrieved chunks;
-- execution and tool duration;
-- structured-output repair attempts and durable model retries.
-
-Prompt files are loaded only from a fixed name/version mapping. The database stores
-prompt name and version, provider, and model—not complete prompts. Audit steps store
-selected tool, sanitized arguments and result summary, evidence references, status,
-duration, and timestamps. Raw logs, secrets, complete prompts, and chain-of-thought
-are not stored in the agent tables.
-
-## Provider capabilities and local inference
-
-`LLMProvider` and `EmbeddingProvider` remain provider-neutral. LLM adapters explicitly
-declare structured-output, native tool-selection, streaming, and usage-metadata
-capabilities. Phase 5 uses a structured planner because Ollama's current adapter does
-not claim native tool selection. Ollama usage counters are persisted when supplied;
-character counts remain approximate metadata.
-
-Incident data, retrieved runbooks, embeddings, and prompts remain inside the local
-Compose network by default. This reduces third-party exposure but does not replace
-host, database-volume, log, and model-volume security.
-
-## Knowledge base and retrieval
-
-The original repository-owned runbooks cover JWT/authentication, PostgreSQL
-connectivity, HTTP timeouts, network connectivity, and container availability.
-`knowledge_base/manifest.json` provides stable source IDs and versions. Deterministic
-chunking and SHA-256 hashes make ingestion idempotent.
-
-Run ingestion manually:
+The first start pulls `qwen2.5:1.5b-instruct` and `nomic-embed-text:v1.5`; this can
+take time. CPU inference is supported but may be slow on the first request.
 
 ```bash
-docker compose exec worker python -m app.knowledge.ingest
-```
-
-The default embedding width is 768. PostgreSQL stores `vector(768)` and uses an HNSW
-cosine index. Changing the embedding width requires an explicit migration.
-
-## Delivery, restart, and failure semantics
-
-The platform provides at-least-once delivery, not exactly-once delivery.
-
-- The incident and outbox event commit atomically before Kafka publication.
-- The outbox retries broker failure without deleting the incident.
-- The consumer uses manual offsets and seeks back on retryable failures.
-- `agent_executions.incident_id` and `ai_resolutions.incident_id` are unique.
-- Each successful tool step is durable, so a worker can resume after restart.
-- Final resolution and `awaiting_review` state are durable before the processed-event
-  marker and Kafka offset commit.
-- `processed_events.event_id` prevents duplicate event processing.
-- A crash after final persistence but before offset commit reuses the durable result
-  without another model call.
-- Ollama, embedding, PostgreSQL, tool-timeout, and other transient failures remain
-  retryable; malformed planner/final output receives bounded repair attempts.
-- Malformed Kafka envelopes are logged and acknowledged so a poison message cannot
-  block its partition.
-
-The implementation does not claim exactly-once model invocation. A crash between a
-provider response and durable step commit can repeat that read-only operation, while
-local persistence and idempotency prevent duplicate durable outcomes.
-
-## PostgreSQL schema
-
-Alembic revision `20260803_0004` adds:
-
-- `agent_executions`: execution/event/incident IDs, lifecycle status, provider/model,
-  prompt name/version, step/tool/model/retry counts, timing totals, retrieval counts,
-  nullable provider usage, safe error metadata, and timestamps;
-- `agent_steps`: ordered action, selected tool, sanitized arguments/result, evidence
-  references, short reason summary, expected evidence, outcome, and duration;
-- `resolution_feedback`: incident/resolution links, rating, review outcome, acceptance,
-  edited flag, bounded comment, demo reviewer label, optional edited value, timestamp;
-- additive `ai_resolutions` fields for evidence summary, tools used, limitations,
-  escalation/review flags, and resolver prompt provenance.
-
-Earlier tables remain: `incidents`, `outbox_events`, `processed_events`,
-`knowledge_documents`, `knowledge_chunks`, `knowledge_embeddings`, and
-`ai_resolutions`. Existing PostgreSQL, Kafka, and Ollama named volumes are preserved.
-
-Phase 6 revision `20260803_0005` adds the nullable JSON `trace_context` column to
-`outbox_events`. It stores only the W3C `traceparent` and optional `tracestate` needed
-to connect a later dispatcher attempt to the original request. Existing events remain
-valid and no business payload or raw incident log is added.
-
-Migration commands:
-
-```bash
-docker compose exec api alembic upgrade head
-docker compose exec api alembic current
-docker compose exec api alembic check
-```
-
-## API
-
-Interactive documentation is at `http://127.0.0.1:8000/docs`.
-
-Create and retrieve an incident:
-
-```bash
-curl.exe -X POST http://127.0.0.1:8000/api/v1/incidents \
-  -H "Content-Type: application/json" \
-  -d '{"service":"identity-api","error":"JWT validation failed","log":"Bearer token has expired","severity":"high"}'
-curl.exe http://127.0.0.1:8000/api/v1/incidents/1
-```
-
-Read the final resolution, Phase 4 retrieval context, execution, and sanitized steps:
-
-```bash
-curl.exe http://127.0.0.1:8000/api/v1/incidents/1/resolution
-curl.exe http://127.0.0.1:8000/api/v1/incidents/1/resolution/context
-curl.exe http://127.0.0.1:8000/api/v1/incidents/1/agent-execution
-curl.exe http://127.0.0.1:8000/api/v1/incidents/1/agent-execution/steps
-```
-
-Record feedback or make an explicit review decision:
-
-```bash
-curl.exe -X POST http://127.0.0.1:8000/api/v1/incidents/1/resolution/feedback \
-  -H "Content-Type: application/json" \
-  -d '{"rating":4,"comment":"Useful evidence","reviewer":"demo-reviewer"}'
-curl.exe -X POST http://127.0.0.1:8000/api/v1/incidents/1/resolution/approve \
-  -H "Content-Type: application/json" \
-  -d '{"rating":5,"comment":"Approved","reviewer":"demo-reviewer"}'
-curl.exe -X POST http://127.0.0.1:8000/api/v1/incidents/1/resolution/reject \
-  -H "Content-Type: application/json" \
-  -d '{"comment":"Needs revision","reviewer":"demo-reviewer"}'
-```
-
-There is intentionally no authentication in this local phase. `reviewer` is a demo
-metadata label, not a verified identity. Production authorization, identity, and
-audit-integrity controls remain future work. Review transitions return 409 when no
-review is pending. Missing incidents return 404.
-
-SSE streaming is deferred: durable polling endpoints are sufficient for Phase 5 and
-avoid adding a second long-lived delivery path. WebSockets are not included.
-
-## Feedback export and golden evaluation
-
-Feedback is explicit evaluation data only. It is never used for automatic learning,
-fine-tuning, prompt mutation, or autonomous behavior changes.
-
-Export a sanitized dataset:
-
-```bash
-python -m app.evaluation.export_feedback --output evaluation_reports/feedback.json
-```
-
-The export excludes raw logs, full prompts, reason summaries, reviewer identity,
-free-form comment text, and secrets. `evaluation_reports/` is ignored by Git.
-
-Run the deterministic fake-provider golden evaluation:
-
-```bash
-python -m app.evaluation.run
-python -m app.evaluation.run --output evaluation_reports/golden.json
-```
-
-The original eight cases cover expired JWT, invalid issuer/audience, PostgreSQL
-connection refusal, pool exhaustion, gateway timeout, DNS/network failure, container
-unavailability, and insufficient evidence. Metrics include citation validity and
-precision, tool selection, budgets, schema validity, classification, completeness,
-escalation behavior, latency, retrieval relevance, and fabricated-source detection.
-The normal suite uses fake providers; a real Ollama evaluation remains an optional
-manual check.
-
-## Docker Compose
-
-Copy the example and use local development-only values. `.env` is ignored by Git:
-
-```powershell
-Copy-Item .env.example .env
-```
-
-Start and inspect the stack:
-
-```bash
+cp .env.example .env
+# Replace every change-me value in .env; the file is ignored by Git.
+python scripts/validate_config.py --env-file .env
 docker compose config --quiet
-docker compose up -d --build
+docker compose up -d --build --wait
 docker compose ps
-docker compose logs -f api worker ollama kafka otel-collector tempo prometheus grafana
 ```
 
-Services and jobs:
+PowerShell uses `Copy-Item .env.example .env`. Once healthy:
 
-- `db`: `pgvector/pgvector:0.8.5-pg17-trixie`, health check, persistent
-  `postgres_data` volume;
-- `kafka`: official Apache Kafka 4.3.1, single-node KRaft, internal listener,
-  persistent `kafka_data` volume;
-- `api`: non-root FastAPI image, Alembic migrations on startup, host port 8000;
-- `ollama`: internal-only API, health check, persistent `ollama_models` volume;
-- `ollama-init`: one-shot pull of configured generation and embedding models;
-- `worker`: idempotent ingestion followed by the Kafka controlled-agent consumer;
-- `otel-collector`: internal OTLP receiver and trace/metric routing;
-- `tempo`: internal local trace store with a persistent `tempo_data` volume;
-- `prometheus`: internal seven-day metric store with a persistent
-  `prometheus_data` volume;
-- `grafana`: provisioned data sources and dashboards, persistent `grafana_data`, host
-  port `${GRAFANA_PORT:-3000}`.
+- API: `http://127.0.0.1:8000`
+- OpenAPI UI: `http://127.0.0.1:8000/docs`
+- Grafana: `http://127.0.0.1:3000`
 
-Only FastAPI (`http://127.0.0.1:8000`) and Grafana
-(`http://127.0.0.1:3000` by default) are published to the host. PostgreSQL, Kafka,
-Ollama, the OTLP receivers, Prometheus, and Tempo remain internal.
-Stop without deleting persistent volumes:
+Useful lifecycle commands:
 
 ```bash
+docker compose logs -f api worker ollama kafka otel-collector tempo prometheus grafana
+docker compose exec api alembic current
+docker compose exec worker python -m app.knowledge.ingest
 docker compose down
 ```
 
-Do not add `--volumes` unless permanent local data deletion is explicitly intended.
+`docker compose down` preserves named volumes. Only the API and Grafana ports are
+published. The single-node plaintext Kafka service is for local development, not HA
+or production use.
 
-## Troubleshooting
+## Technology Stack
 
-Inspect models, agent errors, and consumer lag:
-
-```bash
-docker compose exec ollama ollama list
-docker compose logs --tail 200 worker ollama kafka
-docker compose exec kafka /opt/kafka/bin/kafka-consumer-groups.sh \
-  --bootstrap-server kafka:9092 --describe --group incident-processing-v1
-docker compose exec kafka /opt/kafka/bin/kafka-topics.sh \
-  --bootstrap-server kafka:9092 --describe --topic incident.created
-docker compose logs --tail 200 otel-collector tempo prometheus grafana
-docker compose exec otel-collector /otelcol-contrib validate \
-  --config=/etc/otelcol-contrib/config.yaml
-docker compose exec prometheus promtool check config \
-  /etc/prometheus/prometheus.yml
-docker compose exec tempo /tempo -config.file=/etc/tempo.yaml \
-  -config.verify=true
-```
-
-Exercise Ollama recovery without deleting data:
-
-```bash
-docker compose stop ollama
-# Create an incident and observe retryable execution state.
-docker compose start ollama
-docker compose logs -f worker
-```
-
-The one-shot model initializer skips models already held in `ollama_models`; the
-first start may otherwise download them. CPU inference is supported but can be slow,
-particularly on the first request.
-
-Exercise telemetry isolation without deleting data:
-
-```bash
-docker compose stop otel-collector
-# API, PostgreSQL, Kafka, worker, pgvector, Ollama, and review remain operational.
-docker compose start otel-collector
-docker compose logs --tail 100 otel-collector
-```
-
-The OTLP SDK uses short timeouts, bounded batching, and exception-safe export. Data
-generated while the Collector is unavailable is best-effort and may be dropped; new
-telemetry resumes after recovery. Application data remains durable in PostgreSQL.
-
-## Configuration
-
-`.env.example` documents PostgreSQL, Kafka, Ollama, retrieval, and agent variables.
-Phase 5 settings are:
-
-- `AGENT_MAX_STEPS`, `AGENT_MAX_TOOL_CALLS`;
-- `AGENT_MAX_REPEATED_TOOL_CALLS`, `AGENT_MAX_RETRIEVAL_CHUNKS`;
-- `AGENT_MAX_DURATION_SECONDS`, `AGENT_TOOL_TIMEOUT_SECONDS`;
-- `AGENT_MODEL_RETRIES`, `AGENT_REPAIR_ATTEMPTS`;
-- `AGENT_PLANNER_PROMPT_VERSION`, `AGENT_RESOLVER_PROMPT_VERSION`.
-
-Phase 6 settings are:
-
-- `OTEL_SERVICE_NAME`: overridden by Compose to `ai-support-api` and
-  `ai-support-worker` for their respective processes;
-- `OTEL_EXPORTER_OTLP_ENDPOINT`: internal Collector gRPC endpoint;
-- `OTEL_TRACES_EXPORTER`, `OTEL_METRICS_EXPORTER`: `otlp` in Compose or `none` to
-  disable that signal;
-- `OTEL_RESOURCE_ATTRIBUTES`: comma-separated, bounded resource metadata;
-- `GRAFANA_ADMIN_USER`, `GRAFANA_ADMIN_PASSWORD`, `GRAFANA_PORT`: local Grafana
-  access; credentials are required from the ignored `.env` file.
-
-Credentials are not hardcoded. Local Kafka plaintext and a single broker are
-development choices, not a production security/availability design.
-
-## Tracing, correlation, and privacy
-
-FastAPI request spans lead to deterministic analysis and the incident/outbox
-transaction. W3C trace context is saved with the outbox record, restored by the
-dispatcher, injected into Kafka headers, and extracted by the consumer. Worker child
-spans cover event validation, incident lookup, controlled-agent execution, tool
-validation and calls, embedding and pgvector retrieval, Ollama calls, citation/final
-validation, resolution and agent-step persistence, processed-event insertion, and
-offset commit. Human feedback and review transitions create their own request traces.
-
-`incident.id`, `event.id`, and `agent.execution_id` are trace and structured-log
-correlation attributes. JSON logs automatically add active `trace_id` and `span_id`
-without removing the existing identifiers. These IDs are never metric labels.
-
-Telemetry excludes request bodies, raw errors and incident logs, SQL text and bound
-parameters, retrieved chunk content, prompts, model responses, reviewer identity,
-secrets, and chain-of-thought. Provider/model and prompt name/version are bounded
-operational metadata. Usage counters are emitted only when Ollama actually reports
-them; the platform does not invent token counts.
-
-## Prometheus metrics and cardinality
-
-Metric families cover API requests and latency; incidents; outbox pending, publish,
-failure, retry, and duration; Kafka publish/consume/process/duplicate/malformed,
-failure, duration, and offset commit; agent execution, planner fallback, steps, tools,
-models, retries, retrieval, duration, and review; RAG retrieval/failure/duration/chunks/empty results
-and invalid citations; LLM requests/failures/duration/reported tokens; feedback and
-review outcomes; and database operation/failure/duration.
-
-Every metric passes through an enforced label allowlist:
-
-| Area | Permitted bounded labels |
+| Area | Implementation |
 | --- | --- |
-| API | method, route template, status code |
-| Incidents | deterministic classification and severity |
-| Outbox/Kafka | configured topic, versioned event type, outcome, retryable |
-| Agent/tools | status, classification, fixed action type, allowlisted tool name |
-| Models | configured provider/model, fixed operation, allowlisted prompt name/version |
-| RAG | deterministic classification and outcome |
-| Database | fixed database system, SQL operation verb, outcome |
-| Review | bounded outcome only; reviewer is excluded |
+| API and contracts | Python 3.14, FastAPI, Pydantic, Uvicorn |
+| Persistence | PostgreSQL 17, pgvector, SQLAlchemy, Alembic, psycopg |
+| Messaging | Apache Kafka 4.3 in KRaft mode, confluent-kafka |
+| AI and retrieval | Ollama, `qwen2.5:1.5b-instruct`, `nomic-embed-text:v1.5`, pgvector HNSW cosine search |
+| Observability | OpenTelemetry SDK/Collector, Prometheus, Tempo, Grafana, structured JSON logs |
+| Packaging | Docker Compose, Distroless Debian 13 runtime, Helm 3, Kubernetes/Kind tooling |
+| Quality and security | pytest, Ruff, pip-audit, Trivy, Gitleaks, Actionlint, CycloneDX SBOMs |
 
-Potentially unbounded service names are excluded. `incident_id`, `event_id`,
-`execution_id`, partition/offset, arbitrary service/error/log text, prompts, and user
-input are rejected as labels. They belong only in safe traces/logs where applicable.
+The default embedding width is `768`; changing it requires an explicit database
+migration. Direct dependencies live in `requirements*.txt`, while containers and CI
+install from hash-locked `requirements*.lock` files. `VERSION` is authoritative.
 
-## Grafana dashboards and Tempo
+## Project Structure
 
-Grafana provisions Prometheus and Tempo automatically plus four dashboards in the
-**AI Support Platform** folder:
+```text
+.
+├── app/
+│   ├── agent/               # Controlled workflow, tool registry, audit models
+│   ├── ai/                  # Provider interfaces, Ollama/fake adapters, prompts
+│   ├── api/routes/          # Health, build, incident, resolution, review APIs
+│   ├── evaluation/          # Golden cases, evaluator, feedback export
+│   ├── events/              # Event contracts, Kafka producer, outbox dispatcher
+│   ├── knowledge/           # Runbook loading, chunking, ingestion, retrieval
+│   ├── observability/       # Traces, metrics, instrumentation, context propagation
+│   ├── workers/             # Kafka runner and incident processor
+│   ├── main.py              # FastAPI application
+│   └── runtime.py           # API and worker container entry points
+├── deploy/
+│   ├── helm/ai-support-platform/  # Helm chart and deployment profiles
+│   └── kind/                       # Dedicated local Kind cluster configuration
+├── docs/                    # Kubernetes and production-readiness guides
+├── integration_tests/       # Docker-backed black-box incident workflow
+├── knowledge_base/          # Manifest and five repository-owned runbooks
+├── migrations/              # Alembic environment and schema revisions
+├── observability/           # Collector, Prometheus, Tempo, Grafana configuration
+├── scripts/                 # Configuration and Kubernetes validation tooling
+├── tests/                   # Deterministic unit and component tests
+├── docker-compose.yml       # Complete local stack
+├── docker-compose.integration.yml # Isolated fake-provider integration stack
+├── Dockerfile               # Shared hardened API/worker image
+└── VERSION                  # Authoritative application version
+```
 
-- **Platform Overview**: API rate/errors/latency, incidents, Kafka/worker outcomes,
-  agent status, and Ollama latency;
-- **Kafka and Outbox**: pending events, publishes, failures, retries, duplicates,
-  malformed messages, consumption, and processing duration;
-- **AI / RAG / Agent**: model latency/failures and operations, tool usage/failures,
-  agent duration/retries, retrieved chunks, empty retrieval, invalid citations, and
-  approval/rejection;
-- **Operational Health**: service signals, HTTP/worker/database health indicators,
-  Kafka and Ollama activity, and error rates.
+## Testing
 
-Use Grafana Explore with the Tempo data source to search by service or safe span
-attributes such as `incident.id`. Tempo-to-Prometheus links are provisioned. Loki is
-intentionally absent, so logs are correlated by copying `trace_id` from Tempo into
-`docker compose logs` rather than through a trace-to-log UI.
+Tests are separated into three markers:
 
-## Quality checks
+- `unit` — SQLite and fake ports/providers/Kafka; no Docker or network.
+- `integration` — real PostgreSQL/pgvector, migrations, Kafka, API, outbox, and worker
+  in an isolated Compose project with explicitly enabled fake AI providers.
+- `e2e` — incident creation through a cited resolution in `awaiting_review`.
 
-Tests have explicit layers:
-
-- `unit`: isolated SQLite, fake ports/providers/Kafka, no Docker or network;
-- `integration`: real PostgreSQL/pgvector, migrations, Kafka, API, outbox, and worker
-  in the isolated Compose project, with explicitly enabled deterministic AI;
-- `e2e`: creates an incident, waits for a grounded cited resolution, and checks the
-  durable `awaiting_review` outcome.
-
-The default full suite collects every layer but skips Docker tests unless
+The default suite collects all layers but skips Docker-backed tests unless
 `RUN_INTEGRATION_TESTS=1` is set.
 
 ```bash
 python -m pytest -m unit
 python -m pytest
 ruff check app tests integration_tests scripts migrations
-ruff format --check app tests integration_tests scripts migrations
-python -m compileall -q app tests integration_tests scripts migrations
-python -m pip check
-pip-audit --require-hashes -r requirements.lock
 python scripts/validate_config.py --env-file .env.example
 python scripts/k8s/validate-chart.py
-helm lint deploy/helm/ai-support-platform
-helm template ai-support deploy/helm/ai-support-platform > rendered.yaml
-kubeconform -strict -summary -kubernetes-version 1.35.0 rendered.yaml
-python scripts/k8s/validate-rendered-manifests.py rendered.yaml
-docker compose config --quiet
-docker compose build api worker
-docker compose exec otel-collector /otelcol-contrib validate \
-  --config=/etc/otelcol-contrib/config.yaml
-docker compose exec prometheus promtool check config \
-  /etc/prometheus/prometheus.yml
+docker compose --env-file .env.example config --quiet
 ```
 
-For the isolated integration stack, set ephemeral values in the current shell (do
-not write them into version control), then run:
+Formatting, compilation, dependency, image, Helm, Kubernetes, secret, vulnerability,
+and SBOM checks are documented in [CONTRIBUTING.md](CONTRIBUTING.md).
+
+Docker-backed tests use `docker-compose.integration.yml`, the project name
+`ai-support-integration`, and separate volumes. Export ephemeral values for
+`INTEGRATION_POSTGRES_USER`, `INTEGRATION_POSTGRES_PASSWORD`,
+`INTEGRATION_POSTGRES_DB`, `INTEGRATION_GRAFANA_ADMIN_USER`, and
+`INTEGRATION_GRAFANA_ADMIN_PASSWORD`, then run:
 
 ```bash
-docker compose -p ai-support-integration -f docker-compose.integration.yml up -d --build --wait db kafka api worker
-docker compose -p ai-support-integration -f docker-compose.integration.yml exec -T api alembic current
-RUN_INTEGRATION_TESTS=1 INTEGRATION_BASE_URL=http://127.0.0.1:18000 python -m pytest -m "integration and e2e" integration_tests
-docker compose -p ai-support-integration -f docker-compose.integration.yml down --volumes
+docker compose -p ai-support-integration -f docker-compose.integration.yml \
+  up -d --build --wait db kafka api worker
+RUN_INTEGRATION_TESTS=1 INTEGRATION_BASE_URL=http://127.0.0.1:18000 \
+  python -m pytest -m "integration and e2e" integration_tests
+docker compose -p ai-support-integration -f docker-compose.integration.yml \
+  down --volumes
 ```
 
-Required variables are `INTEGRATION_POSTGRES_USER`,
-`INTEGRATION_POSTGRES_PASSWORD`, `INTEGRATION_POSTGRES_DB`,
-`INTEGRATION_GRAFANA_ADMIN_USER`, and `INTEGRATION_GRAFANA_ADMIN_PASSWORD`. PowerShell
-uses `$env:NAME = "value"` and `$env:RUN_INTEGRATION_TESTS = "1"`; the remaining
-Compose and pytest commands are the same.
+## End-to-End Example
 
-## CI, security, and supply chain
-
-| Workflow | Trigger | Purpose |
-| --- | --- | --- |
-| `ci.yml` | PR and `main` | unit/quality gates, pip-audit, Actionlint, Gitleaks, Trivy, image builds, SBOMs |
-| `integration.yml` | PR, `main`, manual | isolated migrations, knowledge ingestion, Kafka event flow, persistence, grounded resolution |
-| `full-stack.yml` | manual | full observability infrastructure with disclosed fake AI; optional real Ollama on a labeled self-hosted runner |
-| `release.yml` | `v*` tag | verify tag/version, repeat gates, build/scan images, produce SBOMs, metadata, and image archives |
-| `kubernetes.yml` | PR and `main` | Helm lint/render, kubeconform, policy assertions, and Trivy configuration scanning |
-| `kubernetes-integration.yml` | manual | isolated Kind incident flow, pod recovery, persistence, scaling, upgrade, and rollback |
-
-GitHub Actions are pinned to reviewed commit SHAs. Scanner containers, the Python
-builder, and the Distroless runtime use immutable image digests; their reviewed
-tool releases are Trivy 0.73.0, Gitleaks 8.30.1, and Actionlint 1.7.12. Trivy fails
-on `HIGH`/`CRITICAL` dependency and image vulnerabilities, Gitleaks scans repository
-history with redacted output, and pip-audit gates the hash-locked runtime graph. No
-exception/ignore file is present. Generated scan output and SBOMs are ignored locally
-and uploaded as short-retention workflow artifacts.
-
-`requirements.txt` and `requirements-dev.txt` remain the readable direct dependency
-sources. `requirements.lock` and `requirements-dev.lock` are universal Python 3.14
-resolutions with hashes and are the install inputs for containers and CI. After an
-intentional dependency edit, regenerate and review the locks:
+This example mirrors the repository's black-box integration test. The creation
+response is deterministic and does not include an incident ID, so the incident is
+looked up by its exact service name before polling asynchronous state.
 
 ```bash
-uv pip compile requirements.txt --universal --python-version 3.14 --generate-hashes -o requirements.lock
-uv pip compile requirements-dev.txt --universal --python-version 3.14 --generate-hashes -o requirements-dev.lock
+SERVICE="demo-billing-$(date +%s)"
+
+curl -sS -X POST http://127.0.0.1:8000/api/v1/incidents \
+  -H 'Content-Type: application/json' \
+  -d "{\"service\":\"${SERVICE}\",\"error\":\"PostgreSQL connection pool exhausted\",\"log\":\"pool timeout while waiting for an available database connection\",\"severity\":\"critical\"}"
+
+curl -sS "http://127.0.0.1:8000/api/v1/incidents?service=${SERVICE}"
+# Copy the returned id into INCIDENT_ID, then poll durable state:
+INCIDENT_ID=1
+curl -sS "http://127.0.0.1:8000/api/v1/incidents/${INCIDENT_ID}/resolution"
+curl -sS "http://127.0.0.1:8000/api/v1/incidents/${INCIDENT_ID}/resolution/context"
+curl -sS "http://127.0.0.1:8000/api/v1/incidents/${INCIDENT_ID}/agent-execution"
 ```
 
-The root `VERSION` is authoritative. FastAPI metadata, `GET /build`, startup logs,
-and OCI labels consume it. Builds accept safe `GIT_SHA` and RFC 3339 `BUILD_TIME`
-values; absent or malformed values are reported as `unknown`. Compose supports
-configurable repository and tag values; releases use the semantic version and Git
-SHA and do not publish to a registry.
+A completed fake-provider integration run is asserted to contain citations, use
+`get_incident` and `retrieve_runbooks`, report resolution status `completed`, and
+leave execution status `awaiting_review`. Approve it explicitly:
 
-## Environment and runtime hardening
+```bash
+curl -sS -X POST \
+  "http://127.0.0.1:8000/api/v1/incidents/${INCIDENT_ID}/resolution/approve" \
+  -H 'Content-Type: application/json' \
+  -d '{"rating":5,"comment":"Approved","reviewer":"demo-reviewer"}'
+```
 
-The supported profiles are `development`, `test`, `integration`, and
-`production-like`; their trust and infrastructure assumptions are documented in
-[`docs/production-readiness.md`](docs/production-readiness.md). Configuration rejects
-fake providers outside CI profiles, SQLite in production-like mode, unsafe Kafka
-idempotence/timeouts, and inconsistent agent budgets. The validation command also
-checks required Compose/Grafana settings without displaying their values and rejects
-placeholder credentials for production-like rehearsals.
+Feedback and rejection use `/resolution/feedback` and `/resolution/reject`. The
+`reviewer` field is a demo metadata label, not a verified identity. There is
+intentionally no application authentication in the local implementation; production
+identity, authorization, TLS, audit-integrity, and rate controls must be supplied by
+the deployment boundary.
 
-The API sets `X-Content-Type-Options`, `Referrer-Policy`, `X-Frame-Options`, and a
-restrictive `Permissions-Policy`. CSP is omitted intentionally so Swagger UI keeps
-working. Requests are capped at 24 KiB by default, including streamed bodies;
-incident fields and pagination already have schema limits. Authentication, TLS, and
-rate limiting remain deployment-layer gaps rather than pretend controls.
+Evaluation data is not used for automatic learning or prompt mutation. Run the
+deterministic golden evaluation with:
 
-API and worker containers share a minimal Distroless Debian 13 runtime and run as
-numeric UID/GID 10001, with a read-only root filesystem, bounded no-exec `/tmp`, all Linux capabilities dropped,
-`no-new-privileges`, an init process, health checks, and 30-second stop grace periods.
-The API stops the outbox retry thread, flushes its producer, shuts telemetry down
-best-effort, and disposes database pools. The worker stops polling on SIGTERM/SIGINT,
-finishes the current bounded message path, closes Kafka, both provider clients,
-telemetry, and database resources. SQLAlchemy pool size, overflow, connection/pool
-timeouts, and recycling plus Kafka producer/consumer timeouts are configurable.
+```bash
+python -m app.evaluation.run
+```
 
-Local KRaft is a plaintext single broker with replication factor one. It is not HA
-and is not a production Kafka topology. Migrations run in the API startup command
-for Compose convenience; Helm disables that behavior and uses one bounded migration
-Job before normal multi-replica operation.
+## Roadmap
 
-## Current roadmap
+### Implemented
 
-- Phase 1 — complete: FastAPI and deterministic incident analysis.
-- Phase 2 — complete: PostgreSQL, SQLAlchemy/Alembic, Docker, retrieval APIs,
-  health checks, and structured logging.
-- Phase 3 — complete: Kafka KRaft, transactional outbox, asynchronous worker,
-  manual offsets, and idempotency.
-- Phase 4 — complete: pgvector knowledge base, Ollama provider abstractions,
-  grounded structured resolutions, citations, and durable retry state.
-- Phase 5 — complete: bounded support agent, typed evidence tools, versioned
-  planner/resolver prompts, audit ledger, guardrails, human review, feedback export,
-  golden evaluation, and execution metadata.
-- Phase 6 — complete: OpenTelemetry trace propagation, low-cardinality OTLP
-  metrics, Collector, Prometheus, Tempo, provisioned Grafana dashboards, and
-  trace/log correlation.
-- Phase 7 — implemented: GitHub Actions, isolated test layers, hash-locked builds,
-  configuration and runtime hardening, dependency/secret/image scanning, CycloneDX
-  SBOMs, versioned release artifacts, and repository governance.
-- Phase 8 — implemented: portable Helm packaging, Kind tooling, explicit migration
-  and ingestion Jobs, scalable API/worker Deployments, optional local stateful and
-  observability services, security policies, and Kubernetes validation workflows.
-- Later phases: Terraform, cloud deployment, frontend,
-  autonomous remediation, external LLMs, fine-tuning, and service mesh. They are
-  intentionally excluded here.
+- FastAPI incident analysis, PostgreSQL persistence, migrations, and structured logs.
+- Kafka transactional outbox, asynchronous workers, manual offsets, and idempotency.
+- pgvector retrieval, Ollama adapters, grounded resolutions, citations, and retries.
+- Bounded tools and prompts, audit records, human review, and golden evaluation.
+- OpenTelemetry, Prometheus, Tempo, and provisioned Grafana dashboards.
+- Hash-locked delivery, CI security checks, Distroless images, SBOMs, and Helm/Kind.
+
+### Future work
+
+- Authentication, authorization, TLS, rate limiting, and audit-integrity controls.
+- Managed data services, recovery, formal SLOs, autoscaling, and load balancing.
+- Registry publication, image signing, provenance, attestations, and promotion.
+- Terraform, cloud deployment, frontend, external LLMs, remediation, and service mesh.
+
+These items are not implemented or simulated by the current repository.
+
+## Contributing
+
+See [CONTRIBUTING.md](CONTRIBUTING.md) for Python 3.14 setup, hash-locked dependency
+installation, validation commands, migration policy, Kubernetes checks, and release
+versioning. Security issues should follow [SECURITY.md](SECURITY.md).
+
+Keep changes focused, include regression tests, document behavior and configuration
+changes, and never commit credentials, private logs, model files, generated scan
+reports/SBOMs, or hidden reasoning.
+
+## License
+
+No license file is currently included. Until the maintainers add one, no open-source
+license or usage grant should be inferred from this repository.
