@@ -8,7 +8,7 @@ WORKDIR /build
 COPY requirements.lock ./
 RUN python -m pip install --require-hashes --requirement requirements.lock
 
-FROM gcr.io/distroless/cc-debian13@sha256:d97bc0a941b8d4be647dc0ee75b264ddbb772f1ac5ba690a4309c00723b23775 AS runtime
+FROM gcr.io/distroless/cc-debian13@sha256:e86cf4f565c8eee2cbb2be073bb107dafb14734b53d5872da20fdf47418a02f4 AS runtime
 
 ARG APP_VERSION=development
 ARG GIT_SHA=unknown
