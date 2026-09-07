@@ -100,7 +100,7 @@ def upgrade() -> None:
         ),
         sa.CheckConstraint(
             "dimensions = 768",
-            name="ck_knowledge_embeddings_embedding_dimensions_768",
+            name=op.f("ck_knowledge_embeddings_embedding_dimensions_768"),
         ),
         sa.ForeignKeyConstraint(
             ["chunk_id"],
@@ -163,14 +163,15 @@ def upgrade() -> None:
         ),
         sa.CheckConstraint(
             "status IN ('processing', 'retryable', 'completed', 'failed')",
-            name="ck_ai_resolutions_ai_resolution_status_values",
+            name=op.f("ck_ai_resolutions_ai_resolution_status_values"),
         ),
         sa.CheckConstraint(
-            "attempt_count >= 0", name="ck_ai_resolutions_ai_attempts_non_negative"
+            "attempt_count >= 0",
+            name=op.f("ck_ai_resolutions_ai_attempts_non_negative"),
         ),
         sa.CheckConstraint(
             "confidence IS NULL OR (confidence >= 0 AND confidence <= 1)",
-            name="ck_ai_resolutions_ai_confidence_range",
+            name=op.f("ck_ai_resolutions_ai_confidence_range"),
         ),
         sa.ForeignKeyConstraint(
             ["incident_id"],
