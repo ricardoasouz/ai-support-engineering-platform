@@ -115,22 +115,23 @@ def upgrade() -> None:
             "status IN ('pending', 'running', 'waiting_for_tool', 'completed', "
             "'retryable', 'failed', 'cancelled', 'awaiting_review', 'approved', "
             "'rejected')",
-            name="ck_agent_executions_agent_execution_status_values",
+            name=op.f("ck_agent_executions_agent_execution_status_values"),
         ),
         sa.CheckConstraint(
-            "step_count >= 0", name="ck_agent_executions_agent_step_count_non_negative"
+            "step_count >= 0",
+            name=op.f("ck_agent_executions_agent_step_count_non_negative"),
         ),
         sa.CheckConstraint(
             "tool_call_count >= 0",
-            name="ck_agent_executions_agent_tool_count_non_negative",
+            name=op.f("ck_agent_executions_agent_tool_count_non_negative"),
         ),
         sa.CheckConstraint(
             "model_call_count >= 0",
-            name="ck_agent_executions_agent_model_count_non_negative",
+            name=op.f("ck_agent_executions_agent_model_count_non_negative"),
         ),
         sa.CheckConstraint(
             "retry_count >= 0",
-            name="ck_agent_executions_agent_retry_count_non_negative",
+            name=op.f("ck_agent_executions_agent_retry_count_non_negative"),
         ),
         sa.ForeignKeyConstraint(
             ["incident_id"],
@@ -169,10 +170,11 @@ def upgrade() -> None:
             nullable=False,
         ),
         sa.CheckConstraint(
-            "duration_ms >= 0", name="ck_agent_steps_agent_step_duration_non_negative"
+            "duration_ms >= 0",
+            name=op.f("ck_agent_steps_agent_step_duration_non_negative"),
         ),
         sa.CheckConstraint(
-            "step_number > 0", name="ck_agent_steps_agent_step_number_positive"
+            "step_number > 0", name=op.f("ck_agent_steps_agent_step_number_positive")
         ),
         sa.ForeignKeyConstraint(
             ["execution_id"],
@@ -205,11 +207,11 @@ def upgrade() -> None:
         ),
         sa.CheckConstraint(
             "outcome IN ('feedback', 'approved', 'rejected')",
-            name="ck_resolution_feedback_resolution_feedback_outcome_values",
+            name=op.f("ck_resolution_feedback_resolution_feedback_outcome_values"),
         ),
         sa.CheckConstraint(
             "rating IS NULL OR (rating >= 1 AND rating <= 5)",
-            name="ck_resolution_feedback_resolution_feedback_rating_range",
+            name=op.f("ck_resolution_feedback_resolution_feedback_rating_range"),
         ),
         sa.ForeignKeyConstraint(
             ["incident_id"],

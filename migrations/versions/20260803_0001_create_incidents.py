@@ -38,16 +38,16 @@ def upgrade() -> None:
         sa.CheckConstraint(
             "classification IN ('authentication_error', "
             "'database_connection_error', 'timeout_error', 'unknown_error')",
-            name="ck_incidents_classification_values",
+            name=op.f("ck_incidents_classification_values"),
         ),
         sa.CheckConstraint(
             "requested_severity IS NULL OR "
             "requested_severity IN ('low', 'medium', 'high', 'critical')",
-            name="ck_incidents_requested_severity_values",
+            name=op.f("ck_incidents_requested_severity_values"),
         ),
         sa.CheckConstraint(
             "resolved_severity IN ('low', 'medium', 'high', 'critical')",
-            name="ck_incidents_resolved_severity_values",
+            name=op.f("ck_incidents_resolved_severity_values"),
         ),
         sa.PrimaryKeyConstraint("id", name="pk_incidents"),
     )

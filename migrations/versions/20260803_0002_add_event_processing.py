@@ -44,7 +44,7 @@ def upgrade() -> None:
         ),
         sa.CheckConstraint(
             "attempts >= 0",
-            name="ck_outbox_events_attempts_non_negative",
+            name=op.f("ck_outbox_events_attempts_non_negative"),
         ),
         sa.ForeignKeyConstraint(
             ["incident_id"],
