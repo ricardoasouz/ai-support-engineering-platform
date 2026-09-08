@@ -8,6 +8,13 @@ WORKDIR /build
 COPY requirements.lock ./
 RUN python -m pip install --require-hashes --requirement requirements.lock
 
+RUN rm -rf \
+    /usr/local/lib/python3.14/site-packages/pip \
+    /usr/local/lib/python3.14/site-packages/pip-*.dist-info \
+    /usr/local/bin/pip \
+    /usr/local/bin/pip3 \
+    /usr/local/bin/pip3.14
+
 FROM gcr.io/distroless/cc-debian13@sha256:9b615fff20e1a4fad29c2b30562580b212c7dd5e2225236735cca0070ed11c78 AS runtime
 
 ARG APP_VERSION=development
