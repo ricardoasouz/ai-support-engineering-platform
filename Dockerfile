@@ -15,7 +15,7 @@ RUN rm -rf \
     /usr/local/bin/pip3 \
     /usr/local/bin/pip3.14
 
-FROM gcr.io/distroless/cc-debian13@sha256:9b615fff20e1a4fad29c2b30562580b212c7dd5e2225236735cca0070ed11c78 AS runtime
+FROM gcr.io/distroless/cc-debian13@sha256:4594d59540d1948417f6ca2829ddd9294493a7c68b7528f4dd459de7f203a750 AS runtime
 
 ARG APP_VERSION=development
 ARG GIT_SHA=unknown
