@@ -243,7 +243,7 @@ class AIResolutionRecord(Base):
     summary: Mapped[str | None] = mapped_column(Text, nullable=True)
     root_cause: Mapped[str | None] = mapped_column(Text, nullable=True)
     recommended_actions: Mapped[list[str] | None] = mapped_column(JSON, nullable=True)
-    confidence: Mapped[float | None] = mapped_column(nullable=True)
+    confidence: Mapped[float | None] = mapped_column(Float, nullable=True)
     cited_sources: Mapped[list[dict[str, object]] | None] = mapped_column(
         JSON, nullable=True
     )
